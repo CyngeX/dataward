@@ -2,7 +2,7 @@
 type: comprehensive
 title: "Dataward: Automated Data Broker Opt-Out Daemon"
 date: 2026-02-23
-status: in_progress
+status: deepened_ready_for_review
 security_sensitive: true
 priority: high
 breaking_change: false
@@ -408,16 +408,23 @@ Instead of screenshot diffing (high false positive rate, complex), use structure
 12. Implement graceful shutdown — respond to `{"command": "shutdown"}` by closing Chromium and exiting
 
 ### Phase 3: Orchestrator (Scheduler + Task Execution)
-13. Implement task scheduler — simple interval loop with `tokio::time::sleep` + DB `next_recheck_at` timestamp comparison (no cron crate needed)
-14. Implement channel-based DB writer — single `mpsc` channel draining to SQLite, retry 3x, journal fallback
-15. Implement crash recovery — on startup, reset all `running` tasks to `pending`, verify PID file, warn about incomplete previous runs
-16. Implement subprocess manager — spawn long-lived worker, handle stdout EOF (restart), send shutdown on daemon exit
-17. Implement email opt-out worker — `lettre` SMTP (TLS required), template rendering with per-broker variation, daily batch limit (default 20)
-18. Implement API opt-out worker — `reqwest` HTTP client for brokers with deletion APIs
-19. Implement retry logic — exponential backoff (1h, 4h, 24h, 72h), max 5 retries, error-code-aware (don't retry `domain_violation`)
-20. Implement `dataward run` — single-run mode and daemon mode, PID file lock, graceful shutdown (SIGTERM/SIGINT → 30s timeout → force kill)
-21. Implement PII field filtering — orchestrator sends only `required_fields` subset to worker
-22. Implement proof encryption — AES-256-GCM encrypt screenshots before writing to disk
+
+**[DEEPENED] Architecture decomposition:** Orchestrator has three distinct subsystems. `src/orchestrator.rs` owns the top-level lifecycle (startup, shutdown, PID lock) and composes: (a) Scheduler — decides what runs when, (b) Dispatcher — routes tasks to channel-specific workers, (c) SubprocessManager — owns worker process lifecycle. Each is independently testable.
+
+**[DEEPENED] Concurrency model clarified:** Default concurrency=1. For concurrency > 1, spawn multiple worker subprocesses (not multiplexed over single stdin). The JSON-lines protocol already includes task_id for correlation. Concurrency setting controls the number of worker processes, NOT internal browser contexts per worker.
+
+**[DEEPENED] Per-task timeouts required:** Browser tasks 120s, email 30s, API 15s. Dispatcher wraps each task future with `tokio::time::timeout()`. Timed-out tasks marked failed with retryable error code.
+
+13. Implement task scheduler — `tokio::time::interval()` with `MissedTickBehavior::Skip` (not manual sleep) + DB `next_recheck_at` timestamp comparison. **[DEEPENED]** Run one immediate tick at startup to dispatch overdue tasks. Use `LIMIT N` on scheduler query (N = concurrency ceiling). Handle `next_recheck_at IS NULL` rows. Add composite index `(status, next_recheck_at)` replacing two single-column indexes.
+14. ~~Implement channel-based DB writer~~ **[DEEPENED] Already implemented** in Phase 1 (`DbWriteMessage`, `spawn_writer()`, journal fallback). Phase 3 extends with new message types (ProofUpdate, EmailLog, TaskRetry). Use `send().await` (not `try_send`) for back-pressure; if channel full, log WARN and yield.
+15. Implement crash recovery — on startup: (a) check/kill orphaned worker processes first, (b) replay journal entries, (c) reset all `running` tasks to `pending`, (d) reconcile orphaned tasks at `retry_count >= max` as permanently failed, (e) verify PID file via `flock()` (not check-then-write), warn about incomplete previous runs. **[DEEPENED]** Journal replay BEFORE orphan reset — ordering matters.
+16. Implement subprocess manager — spawn long-lived worker with `HOME` set to isolated temp directory (not user HOME), handle stdout EOF (restart with circuit breaker: max 3 crashes per 5 minutes, then halt), send shutdown on daemon exit. **[DEEPENED]** Use `BufReader` with max line length 1MB to prevent OOM from partial/malicious output. On EOF, check for non-empty line buffer and log partial fragment. Worker crash restarts use exponential cooldown.
+17. Implement email opt-out worker — `lettre` SMTP (TLS 1.2+ required), template rendering with per-broker variation, daily batch limit (default 20). **[DEEPENED]** Persist daily email counter + date in DB (not in-memory — survives restart). Validate no CRLF in template interpolation values (SMTP header injection prevention). Define terminal state for exhausted retries: task `failed`, surface in `dataward status`.
+18. Implement API opt-out worker — `reqwest` HTTP client (single pooled client, reused) for brokers with deletion APIs. **[DEEPENED]** Validate 2xx response bodies against expected schema — treat malformed 2xx as `playbook_error`. Group tasks by broker; parallelize within broker up to concurrency ceiling.
+19. Implement retry logic — exponential backoff (1h, 4h, 24h, 72h), max 5 retries, use boolean `error_retryable` flag (not code-aware routing table). **[DEEPENED]** Add per-broker circuit breaker: after N consecutive failures, mark broker `degraded` and skip scheduling until health check succeeds. Add `retry_exhausted` terminal state distinct from permanent failure.
+20. Implement `dataward run` — single-run mode and daemon mode, PID file lock via `flock()` (atomic, stale-safe), graceful shutdown via `CancellationToken` (SIGTERM/SIGINT → cancel token → stop new tasks → wait configurable timeout for active task → force kill → flush DB writer with 5s timeout → direct DB write fallback → record interrupted tasks as pending → remove PID file). **[DEEPENED]** Signal handler is idempotent (AtomicBool — subsequent SIGTERMs are no-ops). Print summary on `--once` with no due tasks.
+21. Implement PII field filtering — orchestrator sends only `required_fields` subset to worker. **[DEEPENED]** Validate all required_fields exist and are non-empty in user profile BEFORE dispatching task. Missing fields → task status `needs_user_data`, surface notification.
+22. Implement proof encryption — AES-256-GCM encrypt screenshots before writing to disk. **[DEEPENED]** Already implemented (`crypto::encrypt_file`). Use random 96-bit nonces (OsRng) per file. Derive proof-specific subkey via HKDF with context "proof-encryption". On encryption failure → task `proof_error`, never write unencrypted proof to disk.
 
 ### Phase 4: Web Dashboard
 23. Implement axum web server — bind `127.0.0.1:9847`, bearer token auth middleware, Host header validation, CSRF tokens
@@ -657,3 +664,97 @@ If any phase fails, earlier phases remain functional.
 **External services:**
 - User's SMTP server (for email opt-outs, TLS required)
 - Internet access (for browser automation and API calls)
+
+---
+
+## [DEEPENED] Enhancement Summary — Phase 3 Focus
+
+**Date:** 2026-02-24
+**Agents:** 7 (Architecture opus, Simplicity sonnet, Security opus, Performance sonnet, Edge Case sonnet, Spec-Flow sonnet, Best Practices haiku)
+**Total findings:** 48 (8 per reviewer)
+**Cross-agent duplicates (3+ agents):** 3 HIGH PRIORITY issues
+
+### Priority Fixes (Must address before Phase 3 implementation)
+
+| # | Issue | Agents | Resolution |
+|---|-------|--------|------------|
+| 1 | **Journal replay not integrated into crash recovery** | ARCH, SIMP, EC, PERF, FLOW | Recovery order: replay journal → kill orphans → reset running → reconcile max-retry. Annotated in step 15. |
+| 2 | **Scheduler query unbounded + wrong indexes** | PERF, EC, ARCH | Add LIMIT, composite index `(status, next_recheck_at)`, handle NULL. Annotated in step 13. |
+| 3 | **Worker crash restart has no circuit breaker** | ARCH, SEC, EC | Max 3 crashes per 5 min → halt daemon. Annotated in step 16. |
+| 4 | **Concurrency model contradictory** | ARCH | Clarified: concurrency = number of worker subprocesses, not internal contexts. Annotated at top of Phase 3. |
+| 5 | **Per-task timeouts missing** | ARCH, PERF | Browser 120s, email 30s, API 15s via `tokio::time::timeout`. Annotated at top of Phase 3. |
+| 6 | **Partial JSON line on crash / stdout OOM** | SEC, EC | BufReader with 1MB max line length. Log partial fragments. Annotated in step 16. |
+| 7 | **PID file TOCTOU race** | SEC, EC | Use `flock()` instead of check-then-write. Detect stale PIDs. Annotated in steps 15, 20. |
+| 8 | **Argon2id re-derived per open_db()** | PERF | Derive once at startup, cache in SecretVec. (Phase 1 TODO — must fix before Phase 3 daemon loop.) |
+
+### Architecture Decisions Made
+
+| Decision | Rationale |
+|----------|-----------|
+| Orchestrator owns lifecycle; Scheduler, Dispatcher, SubprocessManager are composable subsystems | Prevents god-module orchestrator (ARCH-001) |
+| No shared Worker trait for now — three concrete async functions with shared retry/PII helpers | Simplicity wins over premature abstraction (SIMP-004 vs ARCH-004). Add trait when 4th channel emerges. |
+| Don't re-implement DB writer or crash recovery — extend existing code | Already built in Phase 1 (SIMP-001) |
+| Boolean `error_retryable` flag, not error-code routing table | One routing rule doesn't justify a dispatch table (SIMP-003) |
+| Keep journal fallback but scope it tightly | It's already built; removing it is more work than keeping it. But cap journal size (10MB) and add chunked replay (PERF-006). |
+| 30s shutdown timeout configurable via config | Avoid hardcoding unjustified number (SIMP-006). Default 30s, override in config.toml. |
+
+### Security Enhancements
+
+| Enhancement | Source |
+|-------------|--------|
+| Worker HOME set to isolated temp dir (not user HOME) | SEC-003 |
+| Derive proof encryption subkey via HKDF (not raw master key) | SEC-005 |
+| Validate no CRLF in email template interpolation values | SEC-007 |
+| Worker crash circuit breaker prevents fork-bomb restart loops | SEC-004 |
+| PID file via flock() — atomic, stale-safe | SEC-006 |
+| Stdout line length capped at 1MB at byte-read level | SEC-002 |
+
+### Edge Cases to Handle
+
+| Edge Case | Source | Fix |
+|-----------|--------|-----|
+| Partial JSON on worker crash | EC-001 | Log fragment, reset task to pending |
+| Stale PID file from crash | EC-002 | kill(pid, 0) check, remove if dead |
+| Channel-full back-pressure | EC-003 | send().await (blocking), log WARN |
+| NULL next_recheck_at rows invisible | EC-004 | IS NULL OR clause, or NOT NULL constraint |
+| Email counter resets on restart | EC-005 | Persist in DB with date |
+| Multiple SIGTERMs | EC-006 | AtomicBool, idempotent handler |
+| Missing required_fields in profile | EC-007 | Validate before dispatch, `needs_user_data` status |
+| Orphaned tasks at max retry | EC-008 | Reconcile on startup as permanently_failed |
+
+### Spec-Flow Gaps Closed
+
+| Gap | Source | Resolution |
+|-----|--------|------------|
+| Proof encryption failure | FLOW-001 | Task `proof_error`, never write unencrypted |
+| Orphan worker on daemon crash | FLOW-002 | Kill orphan workers before task reset |
+| Email retry exhaustion terminal state | FLOW-003 | Task `failed`, surface in status |
+| Malformed 2xx API response | FLOW-004 | Validate response schema, treat bad 2xx as `playbook_error` |
+| `run --once` with no due tasks | FLOW-005 | Print summary: "0 tasks due. Next: [timestamp]." |
+| Startup-to-first-tick gap | FLOW-006 | Immediate tick at startup |
+| CAPTCHA/stale auto-disable notification | FLOW-007 | WARN log + structured notification |
+| Shutdown journal flush ordering | FLOW-008 | 5s flush timeout, direct DB fallback |
+
+### Best Practices Applied
+
+| Pattern | Source |
+|---------|--------|
+| `CancellationToken` for coordinated shutdown | tokio-util docs |
+| `tokio::time::interval` with `MissedTickBehavior::Skip` | Prevents scheduler drift |
+| `BufReader` + `select!` for subprocess stdout | tokio::process docs |
+| `flock()` via `fs2` crate for PID file | Standard UNIX daemon pattern |
+| Single `reqwest::Client` with connection pooling | reqwest docs |
+| `lettre` TLS 1.2+ enforcement | SMTP security best practice |
+| Bounded channels with explicit back-pressure policy | tokio mpsc docs |
+
+### Simplicity Notes (Deferred as YAGNI)
+
+- **Batched DB transactions:** Write volume too low at scheduler cadence. Add if profiling shows bottleneck.
+- **Worker trait abstraction:** Three structurally different channels don't benefit from a shared trait yet.
+- **Error-code routing table:** Boolean `error_retryable` is sufficient for now.
+- **Elaborate subprocess lifecycle state machine:** Simple spawn-and-restart with circuit breaker is enough for one subprocess type.
+
+### Status
+- **Deepened:** 2026-02-24
+- **Status:** DEEPENED_READY_FOR_REVIEW
+- **Recommended next step:** Generate Phase 3 implementation plan (Standard tier) incorporating these deepened annotations, then implement.
