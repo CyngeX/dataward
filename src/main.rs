@@ -4,6 +4,11 @@ mod crypto;
 mod db;
 mod init;
 mod logging;
+mod api_worker;
+mod email_worker;
+mod orchestrator;
+mod scheduler;
+mod subprocess;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -69,11 +74,7 @@ async fn main() -> Result<()> {
         }
         Commands::Run { once } => {
             require_initialized(&data_dir)?;
-            // Phase 3: orchestrator implementation
-            eprintln!("Run command not yet implemented (Phase 3)");
-            if once {
-                eprintln!("(--once mode)");
-            }
+            orchestrator::run(&data_dir, once).await?;
         }
         Commands::Status => {
             require_initialized(&data_dir)?;

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::path::Path;
 use tokio::sync::mpsc;
 
@@ -49,6 +50,47 @@ pub fn open_db_with_params(
         .context("Failed to enable foreign keys")?;
 
     Ok(conn)
+}
+
+/// Opens the database with a pre-derived SQLCipher hex key.
+///
+/// Use this when you need multiple connections (e.g., read + write) to avoid
+/// the expensive Argon2id derivation on each open call.
+pub fn open_db_with_key(db_path: &Path, hex_key: &str) -> Result<Connection> {
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
+
+    conn.pragma_update(None, "key", hex_key)
+        .context("Failed to set SQLCipher key (wrong passphrase?)")?;
+
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+        .map_err(|_| anyhow::anyhow!("Incorrect passphrase. Your data is safe — try again."))?;
+
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .context("Failed to enable WAL mode")?;
+
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .context("Failed to enable foreign keys")?;
+
+    Ok(conn)
+}
+
+/// Derives the SQLCipher hex key from passphrase and salt.
+///
+/// Returns the hex key string that can be passed to `open_db_with_key`.
+/// Derive once, open multiple connections.
+pub fn derive_db_key(passphrase: &str, salt: &[u8]) -> Result<String> {
+    derive_db_key_with_params(passphrase, salt, &crypto::PRODUCTION_PARAMS)
+}
+
+/// Derives the SQLCipher hex key with explicit Argon2id parameters (used by tests).
+pub fn derive_db_key_with_params(
+    passphrase: &str,
+    salt: &[u8],
+    params: &crypto::Argon2Params,
+) -> Result<String> {
+    let (key, _) = crypto::derive_key_with_params(passphrase.as_bytes(), Some(salt), params)?;
+    Ok(crypto::key_to_sqlcipher_hex(&key))
 }
 
 /// Creates the database and applies the initial schema.
@@ -153,6 +195,8 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tasks_recheck ON opt_out_tasks(next_recheck_at);
         CREATE INDEX IF NOT EXISTS idx_tasks_broker ON opt_out_tasks(broker_id);
         CREATE INDEX IF NOT EXISTS idx_tasks_status_recheck ON opt_out_tasks(status, next_recheck_at);
+        -- CONS-R2-012: Composite index for daily email count query
+        CREATE INDEX IF NOT EXISTS idx_tasks_email_daily ON opt_out_tasks(channel, status, completed_at);
 
         -- Schema version tracking
         CREATE TABLE IF NOT EXISTS schema_version (
@@ -206,6 +250,31 @@ pub fn get_profile_field(conn: &Connection, key: &str) -> Result<Option<Vec<u8>>
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e).context("Failed to read profile field"),
     }
+}
+
+/// Retrieves all PII fields from the user_profile table.
+///
+/// Returns a HashMap of key → value (raw bytes decoded as UTF-8).
+/// Used by the dispatcher to cache profile data per-tick (CONS-R3-003).
+pub fn get_all_profile_fields(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM user_profile")
+        .context("Failed to prepare get_all_profile_fields query")?;
+    let rows = stmt.query_map([], |row| {
+        let key: String = row.get(0)?;
+        let value: Vec<u8> = row.get(1)?;
+        Ok((key, value))
+    }).context("Failed to query profile fields")?;
+
+    let mut fields = HashMap::new();
+    for row in rows {
+        let (key, value) = row.context("Failed to read profile field row")?;
+        let s = String::from_utf8(value)
+            .with_context(|| format!("Profile field '{}' contains invalid UTF-8", key))?;
+        if !s.is_empty() {
+            fields.insert(key, s);
+        }
+    }
+    Ok(fields)
 }
 
 // -- Config helpers --
@@ -285,6 +354,410 @@ pub fn reset_orphaned_tasks(conn: &Connection) -> Result<usize> {
     Ok(count)
 }
 
+// -- Scheduler queries --
+
+/// A task that is due for execution.
+#[derive(Debug, Clone)]
+pub struct DueTask {
+    pub id: i64,
+    pub broker_id: String,
+    pub channel: String,
+    pub retry_count: i32,
+    pub playbook_path: String,
+    pub allowed_domains: Vec<String>,
+    pub max_retries: i32,
+}
+
+/// Retrieves all pending tasks that are due for execution.
+///
+/// A task is due when:
+/// - status = 'pending'
+/// - next_recheck_at IS NULL (first run) OR next_recheck_at <= now
+/// - the associated broker is enabled
+pub fn get_due_tasks(conn: &Connection) -> Result<Vec<DueTask>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.broker_id, t.channel, t.retry_count,
+                b.playbook_path, b.recheck_days
+         FROM opt_out_tasks t
+         JOIN brokers b ON t.broker_id = b.id
+         WHERE t.status = 'pending'
+           AND b.enabled = 1
+           AND (t.next_recheck_at IS NULL OR t.next_recheck_at <= datetime('now'))
+         ORDER BY t.next_recheck_at ASC NULLS FIRST",
+    ).context("Failed to prepare get_due_tasks query")?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(DueTask {
+            id: row.get(0)?,
+            broker_id: row.get(1)?,
+            channel: row.get(2)?,
+            retry_count: row.get(3)?,
+            playbook_path: row.get(4)?,
+            // allowed_domains populated separately below
+            allowed_domains: Vec::new(),
+            max_retries: 3, // default, overridden below
+        })
+    }).context("Failed to query due tasks")?;
+
+    // CONS-R2-018: Surface row deserialization errors instead of silently dropping
+    let tasks: Vec<DueTask> = rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("Failed to deserialize due task rows")?;
+
+    // Populate allowed_domains from playbook YAML (stored in broker metadata)
+    // For now, we'll load them when dispatching. Leave empty here.
+    // The dispatcher will read the playbook file to get allowed_domains.
+
+    Ok(tasks)
+}
+
+/// Creates pending tasks for all enabled brokers that don't have an active task.
+///
+/// An "active" task is one with status in ('pending', 'running').
+/// Returns the number of tasks created.
+pub fn create_missing_tasks(conn: &Connection) -> Result<usize> {
+    let count = conn.execute(
+        "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+         SELECT b.id, 'pending', b.opt_out_channel, datetime('now')
+         FROM brokers b
+         WHERE b.enabled = 1
+           AND NOT EXISTS (
+               SELECT 1 FROM opt_out_tasks t
+               WHERE t.broker_id = b.id
+                 AND t.status IN ('pending', 'running')
+           )",
+        [],
+    ).context("Failed to create missing tasks")?;
+
+    Ok(count)
+}
+
+/// Marks a task as 'running' before dispatch.
+///
+/// Returns Ok(true) if the task was claimed, Ok(false) if another
+/// process/tick already claimed it (0 rows affected).
+pub fn mark_task_running(conn: &Connection, task_id: i64) -> Result<bool> {
+    let rows = conn.execute(
+        "UPDATE opt_out_tasks SET status = 'running' WHERE id = ?1 AND status = 'pending'",
+        [task_id],
+    ).context("Failed to mark task as running")?;
+    Ok(rows > 0)
+}
+
+/// Exponential backoff durations for retries: 1h, 4h, 24h, 72h.
+const RETRY_BACKOFFS: &[i64] = &[3600, 14400, 86400, 259200];
+
+/// Calculates the next retry time based on retry count.
+///
+/// Returns offset in seconds from now. After exhausting RETRY_BACKOFFS,
+/// returns the last value (72h).
+pub fn retry_backoff_secs(retry_count: i32) -> i64 {
+    let idx = (retry_count.max(0) as usize).min(RETRY_BACKOFFS.len() - 1);
+    RETRY_BACKOFFS[idx]
+}
+
+/// Updates a failed task for retry if retryable and under max_retries.
+///
+/// Returns true if the task was scheduled for retry, false if permanently failed.
+/// CONS-R2-010: Uses atomic UPDATE with WHERE clause to avoid TOCTOU.
+pub fn update_task_for_retry(
+    conn: &Connection,
+    task_id: i64,
+    error_code: &str,
+    error_message: &str,
+    error_retryable: bool,
+    duration_ms: i64,
+    max_retries: i32,
+) -> Result<bool> {
+    if error_retryable {
+        // Atomic: UPDATE only if retry_count < max_retries (no separate SELECT)
+        // Use the current retry_count for backoff calculation via CASE expression.
+        // NOTE: CASE values MUST match RETRY_BACKOFFS constant above (CONS-R3-015).
+        // retry_count 0→3600s(1h), 1→14400s(4h), 2→86400s(24h), ≥3→259200s(72h)
+        let rows = conn.execute(
+            "UPDATE opt_out_tasks SET
+                status = 'pending',
+                retry_count = retry_count + 1,
+                error_code = ?1,
+                error_message = ?2,
+                error_retryable = 1,
+                duration_ms = ?3,
+                next_recheck_at = datetime('now', '+' ||
+                    CASE
+                        WHEN retry_count >= 3 THEN 259200
+                        WHEN retry_count = 2 THEN 86400
+                        WHEN retry_count = 1 THEN 14400
+                        ELSE 3600
+                    END || ' seconds')
+             WHERE id = ?4 AND retry_count < ?5",
+            rusqlite::params![error_code, error_message, duration_ms, task_id, max_retries],
+        ).context("Failed to schedule task retry")?;
+
+        if rows > 0 {
+            return Ok(true);
+        }
+        // Fall through: retry_count >= max_retries, mark as permanent failure
+    }
+
+    {
+        conn.execute(
+            "UPDATE opt_out_tasks SET
+                status = 'failure',
+                error_code = ?1,
+                error_message = ?2,
+                error_retryable = ?3,
+                duration_ms = ?4,
+                completed_at = datetime('now')
+             WHERE id = ?5",
+            rusqlite::params![
+                error_code,
+                error_message,
+                error_retryable as i32,
+                duration_ms,
+                task_id,
+            ],
+        ).context("Failed to mark task as permanently failed")?;
+        Ok(false)
+    }
+}
+
+/// Marks a task as successful.
+pub fn complete_task_success(
+    conn: &Connection,
+    task_id: i64,
+    duration_ms: i64,
+    proof_path: Option<&str>,
+    confirmation_text: Option<&str>,
+    recheck_days: i32,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE opt_out_tasks SET
+            status = 'success',
+            duration_ms = ?1,
+            proof_path = ?2,
+            confirmation_text = ?3,
+            completed_at = datetime('now'),
+            next_recheck_at = datetime('now', '+' || ?4 || ' days'),
+            error_code = NULL,
+            error_message = NULL,
+            error_retryable = NULL
+         WHERE id = ?5",
+        rusqlite::params![duration_ms, proof_path, confirmation_text, recheck_days, task_id],
+    ).context("Failed to complete task")?;
+    Ok(())
+}
+
+// -- Run log --
+
+/// Inserts a new run_log entry. Returns the row ID.
+pub fn insert_run_log(conn: &Connection) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO run_log (started_at, total_tasks, succeeded, failed, captcha_blocked)
+         VALUES (datetime('now'), 0, 0, 0, 0)",
+        [],
+    ).context("Failed to insert run log")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Updates a run_log entry with final counts.
+pub fn update_run_log(
+    conn: &Connection,
+    run_id: i64,
+    total: i32,
+    succeeded: i32,
+    failed: i32,
+    captcha_blocked: i32,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE run_log SET
+            completed_at = datetime('now'),
+            total_tasks = ?1,
+            succeeded = ?2,
+            failed = ?3,
+            captcha_blocked = ?4
+         WHERE id = ?5",
+        rusqlite::params![total, succeeded, failed, captcha_blocked, run_id],
+    ).context("Failed to update run log")?;
+    Ok(())
+}
+
+// -- Email rate limiting --
+
+/// Returns the number of email opt-out tasks completed today.
+pub fn get_daily_email_count(conn: &Connection) -> Result<i32> {
+    let count: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM opt_out_tasks
+         WHERE channel = 'email'
+           AND status = 'success'
+           AND completed_at >= date('now')",
+        [],
+        |row| row.get(0),
+    ).context("Failed to count daily emails")?;
+    Ok(count)
+}
+
+// -- Journal replay --
+
+/// Valid task status values for journal replay validation (CONS-008).
+const VALID_TASK_STATUSES: &[&str] = &["pending", "running", "success", "failure"];
+
+/// Replays journal entries that were written during DB write failures.
+///
+/// Returns the number of entries replayed.
+pub fn replay_journal(conn: &Connection, journal_path: &Path) -> Result<usize> {
+    // CONS-R5-001: Check for orphaned .merging file from a crash during atomic merge.
+    // If .merging exists, it contains the fully merged content and should become the journal.
+    let merging_path = journal_path.with_extension("merging");
+    if merging_path.exists() {
+        tracing::warn!("Found orphaned .merging file — recovering from previous crash");
+        std::fs::rename(&merging_path, journal_path)
+            .context("Failed to recover orphaned .merging journal")?;
+    }
+
+    // CONS-R3-004: Check for orphaned .replaying file from a previous crash
+    // (crash between rename-to-.replaying and COMMIT leaves unprocessed entries)
+    let replaying_path = journal_path.with_extension("replaying");
+    if replaying_path.exists() && !journal_path.exists() {
+        tracing::warn!("Found orphaned .replaying file — recovering from previous crash");
+        std::fs::rename(&replaying_path, journal_path)
+            .context("Failed to recover orphaned .replaying journal")?;
+    } else if replaying_path.exists() && journal_path.exists() {
+        // Both exist: .replaying was from a previous crash, new journal has newer entries.
+        // Prepend .replaying content to journal for unified replay.
+        // CONS-R4-005: Use write-to-temp + rename for atomicity.
+        let old_content = std::fs::read_to_string(&replaying_path)
+            .context("Failed to read orphaned .replaying file")?;
+        let new_content = std::fs::read_to_string(journal_path)
+            .context("Failed to read current journal")?;
+        let merged = if old_content.trim().is_empty() {
+            new_content.trim().to_string()
+        } else {
+            format!("{}\n{}", old_content.trim(), new_content.trim())
+        };
+        let merging_path = journal_path.with_extension("merging");
+        std::fs::write(&merging_path, &merged)
+            .context("Failed to write merged journal to temp file")?;
+        std::fs::rename(&merging_path, journal_path)
+            .context("Failed to rename merged journal into place")?;
+        if let Err(e) = std::fs::remove_file(&replaying_path) {
+            tracing::warn!("Failed to remove .replaying after merge: {}. Will be cleaned on next startup.", e);
+        }
+        tracing::warn!("Merged orphaned .replaying into journal for unified replay");
+    }
+
+    if !journal_path.exists() {
+        return Ok(0);
+    }
+
+    // Check journal size limit BEFORE reading into memory (CONS-024)
+    let metadata = std::fs::metadata(journal_path)?;
+    if metadata.len() > 10 * 1024 * 1024 {
+        anyhow::bail!(
+            "Journal file exceeds 10MB limit ({} bytes). Manual intervention required.",
+            metadata.len()
+        );
+    }
+
+    let content = std::fs::read_to_string(journal_path)
+        .context("Failed to read journal file")?;
+
+    if content.trim().is_empty() {
+        let _ = std::fs::remove_file(journal_path);
+        return Ok(0);
+    }
+
+    // Rename to .replaying so the journal is preserved on crash (CONS-012)
+    // replaying_path already defined at function start for CONS-R3-004 recovery
+    std::fs::rename(journal_path, &replaying_path)
+        .context("Failed to rename journal for replay")?;
+
+    let mut replayed = 0;
+    let mut failed = 0;
+    conn.execute_batch("BEGIN")?;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(entry) => {
+                let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match entry_type {
+                    "update_task" => {
+                        if let (Some(task_id), Some(status)) = (
+                            entry.get("task_id").and_then(|v| v.as_i64()),
+                            entry.get("status").and_then(|v| v.as_str()),
+                        ) {
+                            // Validate status against allowlist (CONS-008)
+                            if !VALID_TASK_STATUSES.contains(&status) {
+                                tracing::error!(task_id, status, "Journal entry has invalid status value, skipping");
+                                failed += 1;
+                                continue;
+                            }
+                            match conn.execute(
+                                "UPDATE opt_out_tasks SET status = ?1, completed_at = datetime('now') WHERE id = ?2",
+                                rusqlite::params![status, task_id],
+                            ) {
+                                Ok(_) => replayed += 1,
+                                Err(e) => {
+                                    tracing::error!(task_id, "Journal replay failed for update_task: {}", e);
+                                    failed += 1;
+                                }
+                            }
+                        }
+                    }
+                    "insert_task" => {
+                        if let (Some(broker_id), Some(channel)) = (
+                            entry.get("broker_id").and_then(|v| v.as_str()),
+                            entry.get("channel").and_then(|v| v.as_str()),
+                        ) {
+                            match conn.execute(
+                                "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+                                 SELECT ?1, 'pending', ?2, datetime('now')
+                                 WHERE NOT EXISTS (
+                                     SELECT 1 FROM opt_out_tasks
+                                     WHERE broker_id = ?1 AND status IN ('pending', 'running')
+                                 )",
+                                rusqlite::params![broker_id, channel],
+                            ) {
+                                Ok(_) => replayed += 1,
+                                Err(e) => {
+                                    tracing::error!(broker_id, "Journal replay failed for insert_task: {}", e);
+                                    failed += 1;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(entry_type, "Unknown journal entry type, skipping");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Malformed journal entry, skipping: {}", e);
+                failed += 1;
+            }
+        }
+    }
+
+    conn.execute_batch("COMMIT")?;
+
+    // Only delete after successful commit (CONS-012)
+    // CONS-R2-013: Downgrade to warning — entries are already committed,
+    // so failing to delete is not data loss (at most a harmless re-replay).
+    if let Err(e) = std::fs::remove_file(&replaying_path) {
+        tracing::warn!("Failed to remove replayed journal file (entries already committed): {}", e);
+    }
+
+    if failed > 0 {
+        tracing::warn!(replayed, failed, "Journal replay completed with failures");
+    } else {
+        tracing::info!(replayed, "Replayed journal entries");
+    }
+    Ok(replayed)
+}
+
 // -- Channel-based writer --
 
 /// Messages that can be sent to the DB writer task.
@@ -300,11 +773,38 @@ pub enum DbWriteMessage {
         duration_ms: Option<i64>,
         proof_path: Option<String>,
         confirmation_text: Option<String>,
+        /// If set, delays next_recheck_at by this many days from now.
+        delay_recheck_days: Option<i32>,
     },
     /// Insert a new opt-out task.
     InsertTask {
         broker_id: String,
         channel: String,
+    },
+    /// Record a successful task completion with recheck scheduling.
+    CompleteTaskSuccess {
+        task_id: i64,
+        duration_ms: i64,
+        proof_path: Option<String>,
+        confirmation_text: Option<String>,
+        recheck_days: i32,
+    },
+    /// Record a failed task with retry logic.
+    FailTaskWithRetry {
+        task_id: i64,
+        error_code: String,
+        error_message: String,
+        error_retryable: bool,
+        duration_ms: i64,
+        max_retries: i32,
+    },
+    /// Update a run log entry.
+    UpdateRunLog {
+        run_id: i64,
+        total: i32,
+        succeeded: i32,
+        failed: i32,
+        captcha_blocked: i32,
     },
     /// Graceful shutdown.
     Shutdown,
@@ -362,11 +862,13 @@ pub fn spawn_writer(
                             duration_ms,
                             proof_path,
                             confirmation_text,
+                            delay_recheck_days,
                         } => {
                             let result = conn.execute(
                                 "UPDATE opt_out_tasks SET status = ?1, error_code = ?2, error_message = ?3,
                                  error_retryable = ?4, duration_ms = ?5, proof_path = ?6,
-                                 confirmation_text = ?7, completed_at = datetime('now')
+                                 confirmation_text = ?7, completed_at = datetime('now'),
+                                 next_recheck_at = CASE WHEN ?9 IS NOT NULL THEN datetime('now', '+' || ?9 || ' days') ELSE next_recheck_at END
                                  WHERE id = ?8",
                                 rusqlite::params![
                                     status,
@@ -377,6 +879,7 @@ pub fn spawn_writer(
                                     proof_path,
                                     confirmation_text,
                                     task_id,
+                                    delay_recheck_days,
                                 ],
                             );
                             if let Err(e) = result {
@@ -403,6 +906,76 @@ pub fn spawn_writer(
                                     "channel": channel,
                                 });
                                 write_to_journal(&journal_path, &entry.to_string(), &mut journal_file);
+                            }
+                        }
+                        // CONS-016: Call existing function instead of duplicating SQL
+                        DbWriteMessage::CompleteTaskSuccess {
+                            task_id,
+                            duration_ms,
+                            proof_path,
+                            confirmation_text,
+                            recheck_days,
+                        } => {
+                            if let Err(e) = complete_task_success(
+                                &conn,
+                                task_id,
+                                duration_ms,
+                                proof_path.as_deref(),
+                                confirmation_text.as_deref(),
+                                recheck_days,
+                            ) {
+                                tracing::error!("DB success update failed for task {}: {}. Writing to journal.", task_id, e);
+                                let entry = serde_json::json!({
+                                    "type": "update_task",
+                                    "task_id": task_id,
+                                    "status": "success",
+                                });
+                                write_to_journal(&journal_path, &entry.to_string(), &mut journal_file);
+                            }
+                        }
+                        // CONS-003, CONS-016: Call existing function; journal on failure
+                        DbWriteMessage::FailTaskWithRetry {
+                            task_id,
+                            error_code,
+                            error_message,
+                            error_retryable,
+                            duration_ms,
+                            max_retries,
+                        } => {
+                            match update_task_for_retry(
+                                &conn,
+                                task_id,
+                                &error_code,
+                                &error_message,
+                                error_retryable,
+                                duration_ms,
+                                max_retries,
+                            ) {
+                                Ok(retried) => {
+                                    let status = if retried { "pending" } else { "failure" };
+                                    tracing::debug!(task_id, status, "Task retry result recorded");
+                                }
+                                Err(e) => {
+                                    tracing::error!("DB retry update failed for task {}: {}. Writing to journal.", task_id, e);
+                                    let entry = serde_json::json!({
+                                        "type": "update_task",
+                                        "task_id": task_id,
+                                        "status": "failure",
+                                    });
+                                    write_to_journal(&journal_path, &entry.to_string(), &mut journal_file);
+                                }
+                            }
+                        }
+                        // CONS-004: Log errors instead of silently swallowing
+                        DbWriteMessage::UpdateRunLog {
+                            run_id,
+                            total,
+                            succeeded,
+                            failed,
+                            captcha_blocked,
+                        } => {
+                            if let Err(e) = update_run_log(&conn, run_id, total, succeeded, failed, captcha_blocked) {
+                                tracing::error!(run_id, "Failed to update run log: {}", e);
                             }
                         }
                         DbWriteMessage::Shutdown => {}
@@ -621,6 +1194,372 @@ mod tests {
         let salt_path = dir.path().join("test_writer.db-salt");
         // We just verify the writer task completed without panic; row count varies by timing.
         let _ = (db_path2, salt_path);
+    }
+
+    #[test]
+    fn test_open_db_with_key() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let (_conn, salt) =
+            create_db_with_params(&db_path, "my-passphrase", &TEST_PARAMS).unwrap();
+        drop(_conn);
+
+        // Derive key once
+        let hex_key = derive_db_key_with_params("my-passphrase", &salt, &TEST_PARAMS).unwrap();
+
+        // Open two connections with same key
+        let conn1 = open_db_with_key(&db_path, &hex_key).unwrap();
+        let conn2 = open_db_with_key(&db_path, &hex_key).unwrap();
+
+        // Both should be able to read
+        let _: i32 = conn1
+            .query_row("SELECT COUNT(*) FROM brokers", [], |row| row.get(0))
+            .unwrap();
+        let _: i32 = conn2
+            .query_row("SELECT COUNT(*) FROM brokers", [], |row| row.get(0))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_get_due_tasks_returns_pending() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+
+        // Insert a pending task with no recheck time (first run)
+        conn.execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+             VALUES ('broker1', 'pending', 'web_form', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let tasks = get_due_tasks(&conn).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].broker_id, "broker1");
+    }
+
+    #[test]
+    fn test_get_due_tasks_skips_future() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+
+        // Insert a pending task scheduled for the future
+        conn.execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at, next_recheck_at)
+             VALUES ('broker1', 'pending', 'web_form', datetime('now'), datetime('now', '+1 day'))",
+            [],
+        )
+        .unwrap();
+
+        let tasks = get_due_tasks(&conn).unwrap();
+        assert_eq!(tasks.len(), 0);
+    }
+
+    #[test]
+    fn test_get_due_tasks_skips_disabled_broker() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+        conn.execute("UPDATE brokers SET enabled = 0 WHERE id = 'broker1'", [])
+            .unwrap();
+
+        conn.execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+             VALUES ('broker1', 'pending', 'web_form', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let tasks = get_due_tasks(&conn).unwrap();
+        assert_eq!(tasks.len(), 0);
+    }
+
+    #[test]
+    fn test_create_missing_tasks() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+        insert_test_broker(&conn, "broker2");
+
+        // broker1 already has a pending task
+        conn.execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+             VALUES ('broker1', 'pending', 'web_form', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        // Should create a task only for broker2
+        let created = create_missing_tasks(&conn).unwrap();
+        assert_eq!(created, 1);
+
+        let count: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM opt_out_tasks WHERE broker_id = 'broker2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_retry_backoff_schedule() {
+        assert_eq!(retry_backoff_secs(0), 3600);    // 1h
+        assert_eq!(retry_backoff_secs(1), 14400);   // 4h
+        assert_eq!(retry_backoff_secs(2), 86400);   // 24h
+        assert_eq!(retry_backoff_secs(3), 259200);  // 72h
+        assert_eq!(retry_backoff_secs(99), 259200); // clamped to last
+    }
+
+    #[test]
+    fn test_update_task_for_retry_schedules_retry() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+        conn.execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at, retry_count)
+             VALUES ('broker1', 'running', 'web_form', datetime('now'), 0)",
+            [],
+        )
+        .unwrap();
+        let task_id = conn.last_insert_rowid();
+
+        let retried = update_task_for_retry(
+            &conn, task_id, "selector_not_found", "Button missing", true, 5000, 3,
+        )
+        .unwrap();
+        assert!(retried);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+
+        let retry_count: i32 = conn
+            .query_row(
+                "SELECT retry_count FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retry_count, 1);
+    }
+
+    #[test]
+    fn test_update_task_for_retry_fails_permanently_when_exhausted() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+        conn.execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at, retry_count)
+             VALUES ('broker1', 'running', 'web_form', datetime('now'), 3)",
+            [],
+        )
+        .unwrap();
+        let task_id = conn.last_insert_rowid();
+
+        let retried = update_task_for_retry(
+            &conn, task_id, "playbook_error", "Step failed", true, 5000, 3,
+        )
+        .unwrap();
+        assert!(!retried);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failure");
+    }
+
+    #[test]
+    fn test_update_task_for_retry_non_retryable_fails_immediately() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+        conn.execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at, retry_count)
+             VALUES ('broker1', 'running', 'web_form', datetime('now'), 0)",
+            [],
+        )
+        .unwrap();
+        let task_id = conn.last_insert_rowid();
+
+        let retried = update_task_for_retry(
+            &conn, task_id, "domain_violation", "Security violation", false, 3000, 3,
+        )
+        .unwrap();
+        assert!(!retried);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failure");
+    }
+
+    #[test]
+    fn test_complete_task_success() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+        conn.execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+             VALUES ('broker1', 'running', 'web_form', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let task_id = conn.last_insert_rowid();
+
+        complete_task_success(&conn, task_id, 5000, Some("/proofs/test.png"), Some("Confirmed"), 90)
+            .unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "success");
+
+        // next_recheck_at should be set (90 days from now)
+        let has_recheck: bool = conn
+            .query_row(
+                "SELECT next_recheck_at IS NOT NULL FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_recheck);
+    }
+
+    #[test]
+    fn test_run_log_lifecycle() {
+        let (conn, _dir) = create_test_db();
+
+        let run_id = insert_run_log(&conn).unwrap();
+        assert!(run_id > 0);
+
+        update_run_log(&conn, run_id, 10, 8, 1, 1).unwrap();
+
+        let (total, succeeded): (i32, i32) = conn
+            .query_row(
+                "SELECT total_tasks, succeeded FROM run_log WHERE id = ?1",
+                [run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(total, 10);
+        assert_eq!(succeeded, 8);
+    }
+
+    #[test]
+    fn test_get_daily_email_count() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+
+        // Insert completed email tasks
+        for _ in 0..3 {
+            conn.execute(
+                "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at, completed_at)
+                 VALUES ('broker1', 'success', 'email', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let count = get_daily_email_count(&conn).unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_replay_journal() {
+        let (conn, _dir) = create_test_db();
+        let journal_path = _dir.path().join("test.journal");
+        insert_test_broker(&conn, "broker1");
+        insert_test_broker(&conn, "broker2");
+
+        // Write some journal entries (different brokers for idempotent INSERT)
+        let entries = vec![
+            r#"{"type":"insert_task","broker_id":"broker1","channel":"web_form"}"#,
+            r#"{"type":"insert_task","broker_id":"broker2","channel":"email"}"#,
+        ];
+        std::fs::write(&journal_path, entries.join("\n") + "\n").unwrap();
+
+        let replayed = replay_journal(&conn, &journal_path).unwrap();
+        assert_eq!(replayed, 2);
+
+        // Journal file should be removed after replay
+        assert!(!journal_path.exists());
+
+        // Tasks should exist in DB
+        let count: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM opt_out_tasks",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_replay_journal_missing_file() {
+        let (conn, _dir) = create_test_db();
+        let journal_path = _dir.path().join("nonexistent.journal");
+        let replayed = replay_journal(&conn, &journal_path).unwrap();
+        assert_eq!(replayed, 0);
+    }
+
+    #[test]
+    fn test_mark_task_running() {
+        let (conn, _dir) = create_test_db();
+        insert_test_broker(&conn, "broker1");
+        conn.execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+             VALUES ('broker1', 'pending', 'web_form', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let task_id = conn.last_insert_rowid();
+
+        let claimed = mark_task_running(&conn, task_id).unwrap();
+        assert!(claimed, "Task should be claimed on first attempt");
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
+
+        // CONS-011: Second attempt should return false (already claimed)
+        let claimed_again = mark_task_running(&conn, task_id).unwrap();
+        assert!(!claimed_again, "Task should not be claimable a second time");
+    }
+
+    /// Helper to insert a test broker (used by scheduler query tests).
+    fn insert_test_broker(conn: &Connection, id: &str) {
+        let broker = BrokerRow {
+            id: id.into(),
+            name: format!("Test {}", id),
+            category: "people_search".into(),
+            opt_out_channel: "web_form".into(),
+            recheck_days: 90,
+            parent_company: None,
+            playbook_path: format!("playbooks/official/{}.yaml", id),
+            trust_tier: "official".into(),
+            enabled: true,
+        };
+        upsert_broker(conn, &broker).unwrap();
     }
 
     #[test]
