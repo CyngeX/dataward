@@ -1,0 +1,62 @@
+[package]
+name = "dataward"
+version = "0.1.0"
+edition = "2021"
+description = "Automated data broker opt-out daemon"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/CyngeX/dataward"
+readme = "README.md"
+
+[[bin]]
+name = "dataward"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Web server (dashboard)
+axum = "0.8"
+
+# Database (SQLCipher encrypted SQLite)
+rusqlite = { version = "0.33", features = ["bundled-sqlcipher"] }
+
+# Email
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# Cryptography
+argon2 = "0.5"
+aes-gcm = "0.10"
+getrandom = "0.3"
+hex = "0.4"
+zeroize = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Utilities
+thiserror = "2"
+anyhow = "1"
+url = "2"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+rpassword = "7"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"

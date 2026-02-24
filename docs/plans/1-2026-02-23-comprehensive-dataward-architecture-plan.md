@@ -2,7 +2,7 @@
 type: comprehensive
 title: "Dataward: Automated Data Broker Opt-Out Daemon"
 date: 2026-02-23
-status: approved
+status: in_progress
 security_sensitive: true
 priority: high
 breaking_change: false

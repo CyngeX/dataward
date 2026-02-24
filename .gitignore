@@ -1,0 +1,7 @@
+/target
+.dataward/
+*.enc
+*.db
+*.db-wal
+*.db-shm
+recovery_journal.json
