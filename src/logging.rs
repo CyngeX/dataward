@@ -1,7 +1,14 @@
 use anyhow::{Context, Result};
+use std::io;
 use std::path::Path;
 use tracing_appender::rolling;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{
+    fmt,
+    fmt::MakeWriter,
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+    EnvFilter, Layer,
+};
 
 /// PII field names that must be redacted from all log output.
 const PII_FIELDS: &[&str] = &[
@@ -19,10 +26,73 @@ const PII_FIELDS: &[&str] = &[
     "password",
 ];
 
+/// A writer wrapper that buffers output line-by-line and applies PII
+/// sanitization before forwarding to the inner writer.
+struct SanitizingWriter<W: io::Write> {
+    inner: W,
+    buf: Vec<u8>,
+}
+
+impl<W: io::Write> io::Write for SanitizingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let len = buf.len();
+        self.buf.extend_from_slice(buf);
+
+        // Process complete lines
+        while let Some(newline_pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line = String::from_utf8_lossy(&self.buf[..=newline_pos]);
+            let sanitized = sanitize_pii(&line);
+            self.inner.write_all(sanitized.as_bytes())?;
+            self.buf.drain(..=newline_pos);
+        }
+
+        Ok(len)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buf.is_empty() {
+            let remaining = String::from_utf8_lossy(&self.buf);
+            let sanitized = sanitize_pii(&remaining);
+            self.inner.write_all(sanitized.as_bytes())?;
+            self.buf.clear();
+        }
+        self.inner.flush()
+    }
+}
+
+impl<W: io::Write> Drop for SanitizingWriter<W> {
+    fn drop(&mut self) {
+        if !self.buf.is_empty() {
+            let remaining = String::from_utf8_lossy(&self.buf);
+            let sanitized = sanitize_pii(&remaining);
+            let _ = self.inner.write_all(sanitized.as_bytes());
+            self.buf.clear();
+        }
+        let _ = self.inner.flush();
+    }
+}
+
+/// A MakeWriter wrapper that produces sanitizing writers.
+struct SanitizingMakeWriter<M> {
+    inner: M,
+}
+
+impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for SanitizingMakeWriter<M> {
+    type Writer = SanitizingWriter<M::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SanitizingWriter {
+            inner: self.inner.make_writer(),
+            buf: Vec::new(),
+        }
+    }
+}
+
 /// Initializes the logging system with PII sanitization.
 ///
-/// Logs go to both stderr (for interactive use) and a rotating file
-/// in the data directory.
+/// All log output (stderr and file) passes through automatic PII redaction
+/// via SanitizingMakeWriter. This is defense-in-depth — callers should still
+/// avoid logging PII fields directly.
 pub fn init_logging(data_dir: &Path, level: &str) -> Result<()> {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)
@@ -37,20 +107,26 @@ pub fn init_logging(data_dir: &Path, level: &str) -> Result<()> {
     let file_appender = rolling::daily(&log_dir, "dataward.log");
 
     let env_filter = EnvFilter::try_new(level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or_else(|_| {
+            eprintln!("Warning: Invalid log level '{}', defaulting to 'info'", level);
+            EnvFilter::new("info")
+        });
 
-    // Stderr layer for interactive use
+    // Stderr layer with PII sanitization
     let stderr_layer = fmt::layer()
         .with_target(false)
-        .with_writer(std::io::stderr)
+        .with_writer(SanitizingMakeWriter { inner: io::stderr })
         .with_filter(env_filter);
 
-    // File layer with JSON formatting
+    // File layer with JSON formatting and PII sanitization
     let file_filter = EnvFilter::try_new(level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or_else(|_| {
+            eprintln!("Warning: Invalid log level '{}', defaulting to 'info'", level);
+            EnvFilter::new("info")
+        });
     let file_layer = fmt::layer()
         .json()
-        .with_writer(file_appender)
+        .with_writer(SanitizingMakeWriter { inner: file_appender })
         .with_filter(file_filter);
 
     tracing_subscriber::registry()
@@ -71,7 +147,9 @@ pub fn sanitize_pii(input: &str) -> String {
     for field in PII_FIELDS {
         // Redact JSON-style "field": "value" patterns
         let json_pattern = format!(r#""{}":"#, field);
-        if let Some(start) = output.find(&json_pattern) {
+        let mut search_from = 0;
+        while let Some(start) = output[search_from..].find(&json_pattern) {
+            let start = search_from + start;
             let value_start = start + json_pattern.len();
             if let Some(rest) = output.get(value_start..) {
                 // Handle quoted values: "field": "value"
@@ -80,8 +158,15 @@ pub fn sanitize_pii(input: &str) -> String {
                     if let Some(end) = trimmed[1..].find('"') {
                         let full_end = value_start + (rest.len() - trimmed.len()) + 1 + end + 1;
                         output.replace_range(value_start..full_end, "\"[REDACTED]\"");
+                        search_from = start + json_pattern.len() + "\"[REDACTED]\"".len();
+                    } else {
+                        break;
                     }
+                } else {
+                    search_from = start + json_pattern.len();
                 }
+            } else {
+                break;
             }
         }
 
@@ -182,5 +267,13 @@ mod tests {
         let input = "passphrase=mysecretpass123";
         let output = sanitize_pii(input);
         assert!(!output.contains("mysecretpass123"));
+    }
+
+    #[test]
+    fn test_sanitize_json_multiple_occurrences_same_field() {
+        let input = r#"{"email":"a@a.com","other":"x","email":"b@b.com"}"#;
+        let output = sanitize_pii(input);
+        assert!(!output.contains("a@a.com"), "first occurrence should be redacted");
+        assert!(!output.contains("b@b.com"), "second occurrence should be redacted");
     }
 }

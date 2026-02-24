@@ -318,6 +318,40 @@ secret_key = "should-not-be-here"
     }
 
     #[test]
+    fn test_validate_negative_concurrency() {
+        // concurrency is u8, so negative TOML values should fail to parse
+        let toml = r#"
+[general]
+concurrency = -1
+"#;
+        let result: Result<Config, _> = toml::from_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_port_zero() {
+        // port = 0 is explicitly rejected by validate()
+        let mut config = Config::default();
+        config.dashboard.port = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_port_max() {
+        // port = 65535 is within u16 range and non-zero, should be valid
+        let mut config = Config::default();
+        config.dashboard.port = 65535;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_log_level() {
+        let mut config = Config::default();
+        config.logging.level = "".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn test_load_missing_file_returns_default() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load(dir.path()).unwrap();

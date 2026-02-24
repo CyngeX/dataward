@@ -157,6 +157,12 @@ pub fn encrypt_file(key: &[u8], path: &Path) -> Result<std::path::PathBuf> {
         std::fs::set_permissions(&enc_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
+    // Ensure encrypted data is durable before removing plaintext.
+    let file = std::fs::File::open(&enc_path)
+        .with_context(|| format!("Failed to open encrypted file for fsync: {}", enc_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to fsync encrypted file: {}", enc_path.display()))?;
+
     // Remove the unencrypted original
     std::fs::remove_file(path)
         .with_context(|| format!("Failed to remove unencrypted file: {}", path.display()))?;
@@ -175,10 +181,10 @@ pub fn decrypt_file_to_memory(key: &[u8], enc_path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Generates a cryptographically random token for dashboard auth.
-pub fn generate_auth_token() -> String {
+pub fn generate_auth_token() -> Result<String> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).expect("OS RNG failed");
-    hex::encode(bytes)
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("RNG error: {}", e))?;
+    Ok(hex::encode(bytes))
 }
 
 /// Strips the passphrase environment variable if set.
@@ -186,8 +192,11 @@ pub fn generate_auth_token() -> String {
 /// Call this immediately after reading the passphrase to prevent propagation
 /// to child processes.
 pub fn strip_passphrase_env() {
-    // SAFETY: We only remove a single known env var, and this is called
-    // before any child process spawning.
+    // SAFETY: This MUST be called before the tokio runtime starts its thread
+    // pool. Calling remove_var concurrently with getenv in other threads is
+    // undefined behaviour. get_passphrase (and therefore strip_passphrase_env)
+    // must only be called during single-threaded initialization, before any
+    // async runtime or thread pool is active.
     unsafe {
         std::env::remove_var("DATAWARD_PASSPHRASE");
     }
@@ -277,10 +286,26 @@ mod tests {
 
     #[test]
     fn test_generate_auth_token() {
-        let token1 = generate_auth_token();
-        let token2 = generate_auth_token();
+        let token1 = generate_auth_token().unwrap();
+        let token2 = generate_auth_token().unwrap();
         assert_eq!(token1.len(), 64); // 32 bytes hex-encoded
         assert_ne!(token1, token2); // Random tokens should differ
+    }
+
+    #[test]
+    fn test_aes256gcm_short_key() {
+        // AES-256-GCM must reject a 16-byte (128-bit) key
+        let short_key = vec![0u8; 16];
+        let result = encrypt_aes256gcm(&short_key, b"data");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_aes256gcm_long_key() {
+        // AES-256-GCM must reject a 64-byte key
+        let long_key = vec![0u8; 64];
+        let result = encrypt_aes256gcm(&long_key, b"data");
+        assert!(result.is_err());
     }
 
     #[test]

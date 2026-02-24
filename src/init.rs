@@ -86,7 +86,7 @@ pub async fn run_init(data_dir: &Path) -> Result<()> {
     eprintln!();
 
     for &(field_name, prompt, required) in PROFILE_FIELDS {
-        let value = prompt_field(prompt, required)?;
+        let value = prompt_field(field_name, prompt, required)?;
         if let Some(v) = value {
             db::set_profile_field(&conn, field_name, v.as_bytes())?;
         }
@@ -104,12 +104,16 @@ pub async fn run_init(data_dir: &Path) -> Result<()> {
     }
 
     // Step 5: Generate dashboard auth token
-    let auth_token = crypto::generate_auth_token();
+    let auth_token = crypto::generate_auth_token()?;
     db::set_config(&conn, "dashboard_token", &auth_token)?;
     eprintln!();
-    eprintln!("Dashboard auth token generated. Access your dashboard at:");
-    eprintln!("  http://127.0.0.1:9847?token={}", auth_token);
-    eprintln!("Keep this token secret — it grants access to your dashboard.");
+    eprintln!("Dashboard auth token generated.");
+    eprintln!("  Dashboard URL:  http://127.0.0.1:9847");
+    eprintln!("  Auth token:     {}", auth_token);
+    eprintln!();
+    eprintln!("  The dashboard will require this token via the Authorization header.");
+    eprintln!("  Save this token — it will not be shown again.");
+    eprintln!("  Keep this token secret — it grants full dashboard access.");
 
     // Step 6: Write default config
     Config::write_default(data_dir)?;
@@ -227,7 +231,7 @@ pub async fn run_purge(data_dir: &Path, force: bool) -> Result<()> {
 }
 
 /// Prompts for a single field with validation.
-fn prompt_field(prompt: &str, required: bool) -> Result<Option<String>> {
+fn prompt_field(field_name: &str, prompt: &str, required: bool) -> Result<Option<String>> {
     loop {
         eprint!("{}: ", prompt);
         io::stderr().flush()?;
@@ -244,14 +248,7 @@ fn prompt_field(prompt: &str, required: bool) -> Result<Option<String>> {
             return Ok(None);
         }
 
-        // Extract field name from prompt for validation
-        let field_name = prompt
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
-
-        if let Err(e) = validate_field_value(&field_name, &trimmed) {
+        if let Err(e) = validate_field_value(field_name, &trimmed) {
             eprintln!("  {}", e);
             continue;
         }
@@ -260,10 +257,12 @@ fn prompt_field(prompt: &str, required: bool) -> Result<Option<String>> {
     }
 }
 
+const MAX_FIELD_LENGTH: usize = 500;
+
 /// Validates a PII field value.
 fn validate_field_value(field_name: &str, value: &str) -> Result<()> {
     // Universal checks
-    if value.len() > 500 {
+    if value.chars().count() > MAX_FIELD_LENGTH {
         anyhow::bail!("Value too long (max 500 characters)");
     }
     if value.contains('\0') {
@@ -360,29 +359,34 @@ fn create_data_dir(data_dir: &Path) -> Result<()> {
 
 /// Removes all files within the data directory.
 fn cleanup_data_dir(data_dir: &Path) -> Result<()> {
-    if data_dir.exists() {
-        for entry in std::fs::read_dir(data_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-                    .with_context(|| format!("Failed to remove: {}", path.display()))?;
-            } else {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("Failed to remove: {}", path.display()))?;
+    match std::fs::read_dir(data_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                        .with_context(|| format!("Failed to remove: {}", path.display()))?;
+                } else {
+                    std::fs::remove_file(&path)
+                        .with_context(|| format!("Failed to remove: {}", path.display()))?;
+                }
             }
+            Ok(())
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
     }
-    Ok(())
 }
 
 /// Masks PII for display (shows first 2 and last 2 characters).
 fn mask_pii(value: &str) -> String {
-    if value.len() <= 4 {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 4 {
         return "****".to_string();
     }
-    let first = &value[..2];
-    let last = &value[value.len() - 2..];
+    let first: String = chars[..2].iter().collect();
+    let last: String = chars[chars.len() - 2..].iter().collect();
     format!("{}...{}", first, last)
 }
 
@@ -433,5 +437,56 @@ mod tests {
     fn test_mask_pii_unicode() {
         // Short unicode strings should be safe
         assert_eq!(mask_pii("abc"), "****");
+    }
+
+    #[test]
+    fn test_mask_pii_single_char() {
+        assert_eq!(mask_pii("a"), "****");
+    }
+
+    #[test]
+    fn test_mask_pii_two_chars() {
+        assert_eq!(mask_pii("ab"), "****");
+    }
+
+    #[test]
+    fn test_mask_pii_three_chars() {
+        assert_eq!(mask_pii("abc"), "****");
+    }
+
+    #[test]
+    fn test_mask_pii_multibyte() {
+        // Should not panic on multi-byte chars
+        let result = mask_pii("José");
+        assert_eq!(result, "****"); // 4 chars <= 4
+        let result2 = mask_pii("José Smith");
+        assert!(!result2.is_empty());
+    }
+
+    #[test]
+    fn test_mask_pii_emoji() {
+        // Should not panic on emoji input
+        let result = mask_pii("hello 😀 world");
+        assert!(!result.is_empty());
+        let result2 = mask_pii("😀");
+        assert_eq!(result2, "****");
+    }
+
+    #[test]
+    fn test_validate_email_error_message() {
+        let err = validate_field_value("email", "notanemail").unwrap_err();
+        assert!(err.to_string().contains("email"), "Expected email validation error");
+    }
+
+    #[test]
+    fn test_validate_phone_error_message() {
+        let err = validate_field_value("phone", "123").unwrap_err();
+        assert!(err.to_string().contains("digit"), "Expected phone digit count error");
+    }
+
+    #[test]
+    fn test_validate_zip_error_message() {
+        let err = validate_field_value("zip", "AB").unwrap_err();
+        assert!(err.to_string().contains("ZIP"), "Expected ZIP validation error");
     }
 }

@@ -52,6 +52,9 @@ pub struct BrokerDefinition {
     pub opt_out_channel: String,
     #[serde(default)]
     pub parent_company: Option<String>,
+    /// Note: allowed_domains is self-declared by the playbook author. It prevents navigation to
+    /// domains NOT listed, but does not prevent a malicious playbook author from declaring
+    /// arbitrary domains.
     pub allowed_domains: Vec<String>,
 }
 
@@ -356,7 +359,7 @@ fn validate_step(
     }
 
     if let Some(wait) = &raw.wait {
-        if wait.seconds <= 0.0 || wait.seconds > 30.0 {
+        if wait.seconds.is_nan() || wait.seconds.is_infinite() || wait.seconds <= 0.0 || wait.seconds > 30.0 {
             anyhow::bail!(
                 "Step {} (wait): seconds must be between 0 and 30 (got {})",
                 index,
@@ -417,6 +420,7 @@ pub fn sync_brokers_to_db(
     conn: &rusqlite::Connection,
     playbooks: &[Playbook],
 ) -> Result<()> {
+    conn.execute_batch("BEGIN")?;
     for playbook in playbooks {
         let broker_row = db::BrokerRow {
             id: playbook.broker.id.clone(),
@@ -429,8 +433,12 @@ pub fn sync_brokers_to_db(
             trust_tier: playbook.trust_tier.clone(),
             enabled: true,
         };
-        db::upsert_broker(conn, &broker_row)?;
+        if let Err(e) = db::upsert_broker(conn, &broker_row) {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
     }
+    conn.execute_batch("COMMIT")?;
     Ok(())
 }
 
@@ -508,7 +516,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "bad", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty()); // Rejected
+        assert!(playbooks.is_empty(), "Playbook with unknown fields should be rejected by deny_unknown_fields");
     }
 
     #[test]
@@ -530,7 +538,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "js", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook with javascript: navigate URL should be rejected");
     }
 
     #[test]
@@ -552,7 +560,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "data", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook with data: navigate URL should be rejected");
     }
 
     #[test]
@@ -574,7 +582,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "domain", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook navigating to domain outside allowed_domains should be rejected");
     }
 
     #[test]
@@ -596,7 +604,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "http", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook with http: (non-HTTPS) navigate URL should be rejected");
     }
 
     #[test]
@@ -618,7 +626,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "field", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook using fill field not declared in required_fields should be rejected");
     }
 
     #[test]
@@ -647,7 +655,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "toomany", &yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook exceeding MAX_PLAYBOOK_STEPS (50) should be rejected");
     }
 
     #[test]
@@ -668,7 +676,7 @@ steps: []
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "empty", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook with empty steps list should be rejected");
     }
 
     #[test]
@@ -690,7 +698,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "badcat", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook with invalid broker category should be rejected");
     }
 
     #[test]
@@ -712,7 +720,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "nodomains", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook with empty allowed_domains should be rejected");
     }
 
     #[test]
@@ -734,7 +742,7 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "longwait", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook with wait seconds > 30 should be rejected");
     }
 
     #[test]
@@ -776,6 +784,20 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "file", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty());
+        assert!(playbooks.is_empty(), "Playbook with file: navigate URL should be rejected");
+    }
+
+    #[test]
+    fn test_load_playbooks_missing_directory() {
+        let missing = Path::new("/tmp/dataward_nonexistent_playbooks_dir_xyzzy");
+        // load_playbooks skips non-existent tier subdirectories, so it returns Ok with empty list
+        let result = load_playbooks(missing);
+        match result {
+            Ok(playbooks) => assert!(
+                playbooks.is_empty(),
+                "Missing playbooks directory should yield empty list, not panic"
+            ),
+            Err(_) => {} // Returning an error is also acceptable
+        }
     }
 }

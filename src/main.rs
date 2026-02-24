@@ -48,6 +48,16 @@ fn data_dir(cli_override: Option<&PathBuf>) -> Result<PathBuf> {
     Ok(home.join(".dataward"))
 }
 
+fn require_initialized(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if !data_dir.join("dataward.db").exists() {
+        anyhow::bail!(
+            "Dataward is not initialized. Run `dataward init` first.\nData directory: {}",
+            data_dir.display()
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -58,11 +68,7 @@ async fn main() -> Result<()> {
             init::run_init(&data_dir).await?;
         }
         Commands::Run { once } => {
-            if !data_dir.join("dataward.db").exists() {
-                anyhow::bail!(
-                    "Dataward is not initialized. Run `dataward init` first."
-                );
-            }
+            require_initialized(&data_dir)?;
             // Phase 3: orchestrator implementation
             eprintln!("Run command not yet implemented (Phase 3)");
             if once {
@@ -70,11 +76,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Status => {
-            if !data_dir.join("dataward.db").exists() {
-                anyhow::bail!(
-                    "Dataward is not initialized. Run `dataward init` first."
-                );
-            }
+            require_initialized(&data_dir)?;
             // Phase 6: status implementation
             eprintln!("Status command not yet implemented (Phase 6)");
         }
