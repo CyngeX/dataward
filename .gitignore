@@ -5,3 +5,11 @@
 *.db-wal
 *.db-shm
 recovery_journal.json
+
+# Worker (TypeScript)
+worker/node_modules/
+worker/dist/
+node_modules/
+
+# Review artifacts (ephemeral)
+.review/
