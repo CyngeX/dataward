@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}CAPTCHAs — Dataward{% endblock %}
+{% block content %}
+<h1>CAPTCHA Queue</h1>
+<div id="captcha-queue" hx-get="/captcha/queue" hx-trigger="every 10s" hx-swap="innerHTML">
+{% include "captcha_queue.html" %}
+</div>
+{% endblock %}
