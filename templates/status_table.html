@@ -1,0 +1,53 @@
+{% if brokers.is_empty() %}
+<div class="card empty-state">
+    <p>No brokers loaded. Run <code>dataward init</code> to set up your profile and download playbooks.</p>
+</div>
+{% else %}
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Broker</th>
+                <th>Category</th>
+                <th>Channel</th>
+                <th>Status</th>
+                <th>Last Attempt</th>
+                <th>Next Recheck</th>
+                <th>Success Rate</th>
+                <th>Tier</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for broker in brokers %}
+            <tr>
+                <td>{{ broker.name }}</td>
+                <td>{{ broker.category }}</td>
+                <td>{{ broker.channel }}</td>
+                <td><span class="badge {{ broker.status_class }}">{{ broker.status_label }}</span></td>
+                <td>{{ broker.last_attempt.as_deref().unwrap_or("—") }}</td>
+                <td>{{ broker.next_recheck.as_deref().unwrap_or("—") }}</td>
+                <td>{{ broker.success_rate|fmt("{:.0}") }}%</td>
+                <td>{{ broker.trust_tier }}</td>
+                <td>
+                    {% if broker.can_rerun %}
+                    <button
+                        hx-post="/broker/{{ broker.id }}/rerun"
+                        hx-target="closest td"
+                        hx-swap="innerHTML"
+                        hx-disabled-elt="this"
+                        hx-indicator="next .spinner"
+                    >Re-run</button>
+                    <span class="spinner htmx-indicator"></span>
+                    {% else if !broker.enabled %}
+                    <span class="badge secondary">Disabled</span>
+                    {% else %}
+                    <span class="badge info">In progress</span>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}

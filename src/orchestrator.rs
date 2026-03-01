@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
+use secrecy::{SecretBox, SecretString};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -8,6 +10,7 @@ use crate::api_worker;
 use crate::broker_registry;
 use crate::config::Config;
 use crate::crypto;
+use crate::dashboard;
 use crate::db;
 use crate::email_worker;
 use crate::logging;
@@ -72,15 +75,14 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
         .context("Failed to read salt file. Is Dataward initialized?")?;
     // CONS-015: Use Zeroizing to securely clear key material on drop
     let hex_key = Zeroizing::new(db::derive_db_key(&passphrase, &salt)?);
-    // Passphrase is no longer needed — drop it.
-    drop(passphrase);
+    // Keep passphrase for dashboard master key derivation (dropped after dashboard setup)
+    let passphrase_for_key = passphrase;
 
     // 3. Open DB connections
     let db_path = data_dir.join("dataward.db");
     let read_conn = db::open_db_with_key(&db_path, &hex_key)?;
     let write_conn = db::open_db_with_key(&db_path, &hex_key)?;
-    // hex_key is Zeroizing — memory will be zeroed on drop
-    drop(hex_key);
+    // hex_key kept alive until dashboard state is built (deferred drop)
 
     // CONS-007: Set busy_timeout to handle write contention between read_conn
     // and write_conn in WAL mode. Startup writes (reset_orphaned_tasks,
@@ -115,6 +117,74 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
     // 6. Spawn DB writer
     let (db_tx, writer_handle) = db::spawn_writer(write_conn, journal_path.clone());
 
+    // 6b. Create scheduler notification channel (dashboard → scheduler)
+    let (scheduler_notify_tx, scheduler_notify_rx) = mpsc::channel::<()>(1);
+
+    // 6c. Start dashboard (if auth token configured)
+    let dashboard_handle = {
+        let auth_token = db::get_config(&read_conn, "dashboard_token")?;
+        match auth_token {
+            Some(token) => {
+                // Derive master key for proof decryption (same Argon2id derivation)
+                let (master_key_bytes, _) = crypto::derive_key_with_params(
+                    passphrase_for_key.as_bytes(),
+                    Some(&salt),
+                    &crypto::PRODUCTION_PARAMS,
+                )?;
+                drop(passphrase_for_key); // No longer needed
+
+                // Generate session secret
+                let mut session_secret = [0u8; 32];
+                getrandom::fill(&mut session_secret)
+                    .map_err(|e| anyhow::anyhow!("RNG error: {}", e))?;
+
+                // Create dashboard indexes
+                db::create_dashboard_indexes(&read_conn)?;
+
+                // Precompute token hash for session cookie verification
+                use sha2::Digest;
+                let token_hash = sha2::Sha256::digest(token.as_bytes());
+                let token_hash_b64 = base64::Engine::encode(
+                    &base64::engine::general_purpose::URL_SAFE_NO_PAD, token_hash,
+                );
+
+                let dashboard_state = dashboard::DashboardState {
+                    db_path: db_path.clone(),
+                    db_hex_key: SecretString::from(hex_key.as_str().to_string()),
+                    write_tx: db_tx.clone(),
+                    scheduler_notify: scheduler_notify_tx,
+                    master_key: Arc::new(SecretBox::new(Box::new(master_key_bytes))),
+                    auth_token: SecretString::from(token),
+                    session_secret: Arc::new(SecretBox::new(Box::new(session_secret.to_vec()))),
+                    token_hash_b64,
+                    data_dir: data_dir.to_path_buf(),
+                    login_attempts: Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new())),
+                };
+
+                let cancel_dashboard = CancellationToken::new();
+                let cancel_dashboard_clone = cancel_dashboard.clone();
+
+                match dashboard::start(dashboard_state, cancel_dashboard_clone).await {
+                    Ok(handle) => {
+                        tracing::info!("Dashboard started on http://127.0.0.1:9847");
+                        Some((handle, cancel_dashboard))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to start dashboard (continuing without): {}", e);
+                        None
+                    }
+                }
+            }
+            None => {
+                tracing::info!("No dashboard token configured, skipping dashboard");
+                None
+            }
+        }
+    };
+
+    // hex_key is Zeroizing — memory will be zeroed on drop
+    drop(hex_key);
+
     // 7. Set up cancellation and signal handlers
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
@@ -135,13 +205,24 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
     let result = if once {
         run_once(&read_conn, &db_tx, &config, &playbooks_dir, &proof_dir, data_dir, &cancel).await
     } else {
-        run_daemon(&read_conn, &db_tx, &config, &playbooks_dir, &proof_dir, data_dir, &cancel).await
+        run_daemon(&read_conn, &db_tx, &config, &playbooks_dir, &proof_dir, data_dir, &cancel, scheduler_notify_rx).await
     };
 
     // 9. Graceful shutdown
     tracing::info!("Initiating shutdown...");
 
-    // Signal DB writer to shut down
+    // 9a. Shut down dashboard first (5s timeout)
+    if let Some((handle, cancel_token)) = dashboard_handle {
+        tracing::info!("Stopping dashboard...");
+        cancel_token.cancel();
+        match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+            Ok(Ok(())) => tracing::info!("Dashboard shut down cleanly"),
+            Ok(Err(e)) => tracing::warn!("Dashboard task panicked: {}", e),
+            Err(_) => tracing::warn!("Dashboard shutdown timed out after 5s"),
+        }
+    }
+
+    // 9b. Signal DB writer to shut down
     let _ = db_tx.send(db::DbWriteMessage::Shutdown).await; // Shutdown send failure is expected if writer already stopped
     drop(db_tx);
 
@@ -209,6 +290,7 @@ async fn run_daemon(
     proof_dir: &Path,
     data_dir: &Path,
     cancel: &CancellationToken,
+    mut scheduler_notify_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
     // CONS-R2-008: Validate interval_hours > 0 (zero causes tokio panic)
     if config.scheduler.interval_hours == 0 {
@@ -255,6 +337,36 @@ async fn run_daemon(
                     }
                     Err(e) => {
                         tracing::error!("Scheduler tick failed: {}", e);
+                    }
+                }
+            }
+            // Dashboard notification: CAPTCHA resolved or re-run triggered → immediate tick
+            _ = scheduler_notify_rx.recv() => {
+                tracing::info!("Dashboard triggered immediate scheduler tick");
+                match scheduler::scheduler_tick(read_conn, playbooks_dir) {
+                    Ok(tick) => {
+                        match dispatch_tasks(
+                            read_conn, db_tx, config, &tick.due_tasks, proof_dir, data_dir, cancel,
+                        ).await {
+                            Ok(summary) => {
+                                if let Err(e) = db_tx.send(db::DbWriteMessage::UpdateRunLog {
+                                    run_id: tick.run_id,
+                                    total: summary.total,
+                                    succeeded: summary.succeeded,
+                                    failed: summary.failed,
+                                    captcha_blocked: summary.captcha_blocked,
+                                }).await {
+                                    tracing::error!(run_id = tick.run_id, "Failed to send run log update: {}", e);
+                                }
+                                tracing::info!(%summary, "Dashboard-triggered tick complete");
+                            }
+                            Err(e) => {
+                                tracing::error!("Dashboard-triggered dispatch failed: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Dashboard-triggered scheduler tick failed: {}", e);
                     }
                 }
             }

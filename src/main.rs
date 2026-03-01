@@ -1,6 +1,7 @@
 mod broker_registry;
 mod config;
 mod crypto;
+mod dashboard;
 mod db;
 mod init;
 mod logging;

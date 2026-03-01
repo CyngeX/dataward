@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Health — Dataward{% endblock %}
+{% block content %}
+<h1>Health Indicators</h1>
+
+{% if !has_run_data %}
+<div class="card empty-state">
+    <p>No run data yet. Run <code>dataward run</code> to generate health statistics.</p>
+</div>
+{% else %}
+
+<div class="stats-grid">
+    <div class="card stat-card">
+        <div class="stat-value">{{ total_brokers }}</div>
+        <div class="stat-label">Total Brokers</div>
+    </div>
+    <div class="card stat-card">
+        <div class="stat-value">{{ active_brokers }}</div>
+        <div class="stat-label">Active</div>
+    </div>
+    <div class="card stat-card">
+        <div class="stat-value">{{ disabled_brokers }}</div>
+        <div class="stat-label">Disabled</div>
+    </div>
+    <div class="card stat-card">
+        <div class="stat-value">{{ pending_tasks }}</div>
+        <div class="stat-label">Pending Tasks</div>
+    </div>
+</div>
+
+{% if let Some(run) = last_run_summary %}
+<div class="card">
+    <h2 style="margin-bottom: 0.75rem;">Last Run</h2>
+    <p style="color: var(--text-muted); margin-bottom: 0.5rem;">{{ run.started_at }}</p>
+    <div class="stats-grid">
+        <div><span class="stat-value" style="font-size: 1.5rem;">{{ run.total }}</span> <span class="stat-label">Total</span></div>
+        <div><span class="stat-value" style="font-size: 1.5rem; color: var(--success);">{{ run.succeeded }}</span> <span class="stat-label">Succeeded</span></div>
+        <div><span class="stat-value" style="font-size: 1.5rem; color: var(--danger);">{{ run.failed }}</span> <span class="stat-label">Failed</span></div>
+        <div><span class="stat-value" style="font-size: 1.5rem; color: var(--warning);">{{ run.captcha_blocked }}</span> <span class="stat-label">CAPTCHA</span></div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="flex-between" style="margin-bottom: 0.75rem;">
+        <h2>SMTP Status</h2>
+    </div>
+    <p>Emails sent today: <strong>{{ emails_today }}</strong> / {{ email_limit }}</p>
+</div>
+
+{% if !broker_health.is_empty() %}
+<div class="card">
+    <h2 style="margin-bottom: 0.75rem;">Broker Health</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Broker</th>
+                <th>Health</th>
+                <th>Success Rate</th>
+                <th>Attempts</th>
+                <th>Successful</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for b in broker_health %}
+            <tr>
+                <td>{{ b.name }}</td>
+                <td><span class="badge {{ b.health_class }}">{{ b.health_label }}</span></td>
+                <td>{{ b.success_rate|fmt("{:.0}") }}%</td>
+                <td>{{ b.total_attempts }}</td>
+                <td>{{ b.successful }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}

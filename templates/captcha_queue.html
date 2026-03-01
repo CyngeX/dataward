@@ -1,0 +1,63 @@
+{% if items.is_empty() %}
+<div class="card empty-state">
+    <p>No CAPTCHAs pending. Brokers requiring manual intervention will appear here.</p>
+</div>
+{% else %}
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Broker</th>
+                <th>Created</th>
+                <th>Retries</th>
+                <th>Time Remaining</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for item in items %}
+            <tr>
+                <td>{{ item.broker_name }}</td>
+                <td>{{ item.created_at }}</td>
+                <td>{{ item.retry_count }}</td>
+                <td>
+                    {% if item.expired %}
+                    <span class="badge danger">Expired</span>
+                    {% else %}
+                    {{ item.time_remaining }}
+                    {% endif %}
+                </td>
+                <td>
+                    {% if !item.expired %}
+                    {% if item.broker_url.starts_with("http://") || item.broker_url.starts_with("https://") %}
+                    <a href="{{ item.broker_url }}" target="_blank" class="btn" rel="noopener noreferrer">Solve</a>
+                    {% else %}
+                    <span class="badge secondary">{{ item.broker_url }}</span>
+                    {% endif %}
+                    <button
+                        hx-post="/captcha/{{ item.id }}/resolve"
+                        hx-target="closest tr"
+                        hx-swap="outerHTML"
+                        hx-confirm="Mark this CAPTCHA as resolved?"
+                        hx-disabled-elt="this"
+                        hx-indicator="next .spinner"
+                    >Mark Resolved</button>
+                    <span class="spinner htmx-indicator"></span>
+                    {% endif %}
+                    <button
+                        class="btn-danger"
+                        hx-post="/captcha/{{ item.id }}/abandon"
+                        hx-target="closest tr"
+                        hx-swap="outerHTML"
+                        hx-confirm="Abandon this CAPTCHA? It will return to the queue."
+                        hx-disabled-elt="this"
+                        hx-indicator="next .spinner"
+                    >Abandon</button>
+                    <span class="spinner htmx-indicator"></span>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}

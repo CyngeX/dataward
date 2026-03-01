@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}History — Dataward{% endblock %}
+{% block content %}
+<h1>Opt-out History</h1>
+{% if tasks.is_empty() && next_cursor_ts.is_none() %}
+<div class="card empty-state">
+    <p>No opt-out attempts yet. Run <code>dataward run</code> to start processing brokers.</p>
+</div>
+{% else %}
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Broker</th>
+                <th>Channel</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th>Completed</th>
+                <th>Duration</th>
+                <th>Proof</th>
+                <th>Error</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for task in tasks %}
+            <tr>
+                <td>{{ task.broker_name }}</td>
+                <td>{{ task.channel }}</td>
+                <td><span class="badge {{ task.status_class }}">{{ task.status }}</span></td>
+                <td>{{ task.created_at }}</td>
+                <td>{{ task.completed_at.as_deref().unwrap_or("—") }}</td>
+                <td>{% match task.duration_ms %}{% when Some with (ms) %}{{ ms }}ms{% when None %}—{% endmatch %}</td>
+                <td>
+                    {% if task.has_proof %}
+                    <a href="/history/proof/{{ task.id }}" target="_blank" class="btn">View</a>
+                    {% else %}
+                    —
+                    {% endif %}
+                </td>
+                <td>{{ task.error_message.as_deref().unwrap_or("") }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% if has_more %}
+<div style="text-align: center; margin-top: 1rem;">
+    <a
+        href="/history?cursor_ts={{ next_cursor_ts.as_deref().unwrap_or("") }}&cursor_id={{ next_cursor_id.unwrap_or(0) }}"
+        class="btn"
+        hx-get="/history?cursor_ts={{ next_cursor_ts.as_deref().unwrap_or("") }}&cursor_id={{ next_cursor_id.unwrap_or(0) }}"
+        hx-target=".container"
+        hx-swap="innerHTML"
+        hx-indicator="#load-more-spinner"
+    >
+        Load More
+    </a>
+    <span id="load-more-spinner" class="spinner htmx-indicator"></span>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -756,6 +756,451 @@ pub fn replay_journal(conn: &Connection, journal_path: &Path) -> Result<usize> {
         tracing::info!(replayed, "Replayed journal entries");
     }
     Ok(replayed)
+}
+
+// -- Dashboard query functions --
+
+/// Row returned by `get_broker_statuses` for the status page.
+pub struct BrokerStatusRow {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub channel: String,
+    pub trust_tier: String,
+    pub enabled: bool,
+    pub success_rate: f64,
+    pub latest_status: Option<String>,
+    pub last_attempt: Option<String>,
+    pub next_recheck: Option<String>,
+}
+
+/// Returns broker statuses with their latest task info (window function CTE).
+pub fn get_broker_statuses(conn: &Connection) -> Result<Vec<BrokerStatusRow>> {
+    let mut stmt = conn.prepare(
+        "WITH latest_tasks AS (
+            SELECT
+                broker_id, status, created_at, next_recheck_at,
+                ROW_NUMBER() OVER (PARTITION BY broker_id ORDER BY created_at DESC) AS rn
+            FROM opt_out_tasks
+        )
+        SELECT
+            b.id, b.name, b.category, b.opt_out_channel, b.trust_tier, b.enabled,
+            b.success_rate,
+            lt.status, lt.created_at, lt.next_recheck_at
+        FROM brokers b
+        LEFT JOIN latest_tasks lt ON b.id = lt.broker_id AND lt.rn = 1
+        ORDER BY b.name"
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(BrokerStatusRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            category: row.get(2)?,
+            channel: row.get(3)?,
+            trust_tier: row.get(4)?,
+            enabled: row.get::<_, i32>(5)? != 0,
+            success_rate: row.get(6)?,
+            latest_status: row.get(7)?,
+            last_attempt: row.get(8)?,
+            next_recheck: row.get(9)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to query broker statuses")
+}
+
+/// Row returned by `get_task_history` for the history page.
+pub struct TaskHistoryRow {
+    pub id: i64,
+    pub broker_name: String,
+    pub channel: String,
+    pub status: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub proof_path: Option<String>,
+    pub error_message: Option<String>,
+}
+
+/// Returns task history with cursor-based pagination.
+///
+/// Cursor is `(completed_at, id)`. First page: pass `None` for both.
+pub fn get_task_history(
+    conn: &Connection,
+    cursor_ts: Option<&str>,
+    cursor_id: Option<i64>,
+    limit: i64,
+) -> Result<Vec<TaskHistoryRow>> {
+    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (cursor_ts, cursor_id) {
+        (Some(ts), Some(id)) => (
+            "SELECT t.id, b.name, t.channel, t.status, t.created_at, t.completed_at,
+                    t.duration_ms, t.proof_path, t.error_message
+             FROM opt_out_tasks t
+             JOIN brokers b ON t.broker_id = b.id
+             WHERE (t.completed_at < ?1 OR (t.completed_at = ?1 AND t.id < ?2))
+             ORDER BY t.completed_at DESC NULLS LAST, t.id DESC
+             LIMIT ?3".to_string(),
+            vec![
+                Box::new(ts.to_string()) as Box<dyn rusqlite::types::ToSql>,
+                Box::new(id),
+                Box::new(limit),
+            ],
+        ),
+        _ => (
+            "SELECT t.id, b.name, t.channel, t.status, t.created_at, t.completed_at,
+                    t.duration_ms, t.proof_path, t.error_message
+             FROM opt_out_tasks t
+             JOIN brokers b ON t.broker_id = b.id
+             ORDER BY t.completed_at DESC NULLS LAST, t.id DESC
+             LIMIT ?1".to_string(),
+            vec![Box::new(limit) as Box<dyn rusqlite::types::ToSql>],
+        ),
+    };
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(TaskHistoryRow {
+            id: row.get(0)?,
+            broker_name: row.get(1)?,
+            channel: row.get(2)?,
+            status: row.get(3)?,
+            created_at: row.get(4)?,
+            completed_at: row.get(5)?,
+            duration_ms: row.get(6)?,
+            proof_path: row.get(7)?,
+            error_message: row.get(8)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to query task history")
+}
+
+/// Row returned by `get_captcha_queue`.
+pub struct CaptchaQueueRow {
+    pub id: i64,
+    pub broker_id: String,
+    pub broker_name: String,
+    pub broker_url: String,
+    pub created_at: String,
+    pub retry_count: i32,
+}
+
+/// Returns tasks in captcha_blocked status, ordered by creation time (oldest first).
+pub fn get_captcha_queue(conn: &Connection) -> Result<Vec<CaptchaQueueRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.broker_id, b.name, b.playbook_path, t.created_at, t.retry_count
+         FROM opt_out_tasks t
+         JOIN brokers b ON t.broker_id = b.id
+         WHERE t.status = 'captcha_blocked'
+         ORDER BY t.created_at ASC
+         LIMIT 200"
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        // Use the broker's URL from playbook_path parent context, or fallback
+        // For now we use the broker name as URL since the actual broker URL is in the playbook
+        Ok(CaptchaQueueRow {
+            id: row.get(0)?,
+            broker_id: row.get(1)?,
+            broker_name: row.get(2)?,
+            broker_url: row.get::<_, String>(3).unwrap_or_default(), // playbook_path as fallback
+            created_at: row.get(4)?,
+            retry_count: row.get(5)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to query captcha queue")
+}
+
+/// Result of a CAPTCHA mutation (resolve/abandon).
+pub enum CaptchaMutationResult {
+    /// Operation succeeded.
+    Success,
+    /// Task not found.
+    NotFound,
+    /// Task is not in captcha_blocked status.
+    WrongStatus,
+    /// Task has expired (>24h).
+    Expired,
+    /// Max retries exceeded — task permanently failed.
+    MaxRetriesExceeded,
+}
+
+/// Resolves a CAPTCHA task: sets status to pending, resets retry_count.
+///
+/// Uses a single atomic UPDATE with all guards in the WHERE clause to prevent
+/// TOCTOU races under concurrent requests.
+pub fn resolve_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMutationResult> {
+    // First check if task exists at all (for NotFound vs WrongStatus distinction)
+    let task_status: Option<String> = conn.query_row(
+        "SELECT status FROM opt_out_tasks WHERE id = ?1",
+        [task_id],
+        |row| row.get(0),
+    ).optional().context("Failed to query task")?;
+
+    match task_status.as_deref() {
+        None => return Ok(CaptchaMutationResult::NotFound),
+        Some(s) if s != "captcha_blocked" => return Ok(CaptchaMutationResult::WrongStatus),
+        _ => {}
+    }
+
+    // Atomic UPDATE: status guard + expiry guard in WHERE clause.
+    // If another request resolved/abandoned first, rows_affected == 0.
+    let rows = conn.execute(
+        "UPDATE opt_out_tasks SET status = 'pending', retry_count = 0
+         WHERE id = ?1 AND status = 'captcha_blocked'
+           AND created_at > datetime('now', '-24 hours')",
+        [task_id],
+    ).context("Failed to resolve captcha task")?;
+
+    if rows == 0 {
+        // Task was captcha_blocked but expired (created_at > 24h ago), or another
+        // request resolved it between our SELECT and UPDATE (race — correct behavior).
+        return Ok(CaptchaMutationResult::Expired);
+    }
+
+    Ok(CaptchaMutationResult::Success)
+}
+
+/// Abandons a CAPTCHA task: increments retry_count, returns to pending.
+/// If retry_count >= 4 (meaning this is the 5th+ abandon), permanently fails the task.
+///
+/// Uses atomic UPDATEs with retry_count guards in WHERE to prevent TOCTOU races.
+pub fn abandon_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMutationResult> {
+    // Check task exists and is in correct status
+    let task_status: Option<String> = conn.query_row(
+        "SELECT status FROM opt_out_tasks WHERE id = ?1",
+        [task_id],
+        |row| row.get(0),
+    ).optional().context("Failed to query task")?;
+
+    match task_status.as_deref() {
+        None => return Ok(CaptchaMutationResult::NotFound),
+        Some(s) if s != "captcha_blocked" => return Ok(CaptchaMutationResult::WrongStatus),
+        _ => {}
+    }
+
+    // Try the permanent-failure path first (retry_count >= 4 means 5th+ abandon).
+    // Atomic: only matches if status AND retry_count threshold both hold.
+    let perm_fail_rows = conn.execute(
+        "UPDATE opt_out_tasks SET status = 'failure', error_code = 'max_retries_exceeded',
+         error_message = 'CAPTCHA abandoned too many times', completed_at = datetime('now')
+         WHERE id = ?1 AND status = 'captcha_blocked' AND retry_count >= 4",
+        [task_id],
+    ).context("Failed to permanently fail captcha task")?;
+
+    if perm_fail_rows > 0 {
+        return Ok(CaptchaMutationResult::MaxRetriesExceeded);
+    }
+
+    // Normal abandon: increment retry_count and return to pending.
+    // Atomic: only matches if still captcha_blocked AND retry_count < 4.
+    let rows = conn.execute(
+        "UPDATE opt_out_tasks SET status = 'pending', retry_count = retry_count + 1
+         WHERE id = ?1 AND status = 'captcha_blocked' AND retry_count < 4",
+        [task_id],
+    ).context("Failed to abandon captcha task")?;
+
+    if rows == 0 {
+        // Another request changed the status or retry_count between our SELECT and UPDATE
+        return Ok(CaptchaMutationResult::WrongStatus);
+    }
+
+    Ok(CaptchaMutationResult::Success)
+}
+
+/// Checks if a task is expired (created_at + 24h < now).
+fn check_task_expired(created_at: &str) -> bool {
+    let created = chrono::NaiveDateTime::parse_from_str(created_at, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| chrono::DateTime::parse_from_rfc3339(created_at)
+            .map(|dt| dt.naive_utc()));
+    match created {
+        Ok(dt) => {
+            let now = chrono::Utc::now().naive_utc();
+            now.signed_duration_since(dt).num_hours() > 24
+        }
+        Err(_) => false, // Can't parse — don't expire
+    }
+}
+
+/// Returns the proof_path for a task, if it exists.
+pub fn get_task_proof_path(conn: &Connection, task_id: i64) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT proof_path FROM opt_out_tasks WHERE id = ?1",
+        [task_id],
+        |row| row.get(0),
+    ).optional().context("Failed to query task proof path")
+}
+
+/// Result of a broker re-run trigger.
+pub enum RerunResult {
+    /// New task created (includes broker name for response).
+    Created(String),
+    /// A pending/running task already exists for this broker.
+    AlreadyQueued,
+    /// Broker not found.
+    BrokerNotFound,
+    /// Broker is disabled.
+    BrokerDisabled,
+}
+
+/// Triggers a re-run for a broker via atomic INSERT WHERE NOT EXISTS.
+///
+/// Combines the enabled check and duplicate-task check into a single atomic INSERT...SELECT
+/// to prevent TOCTOU races (broker disabled between check and insert).
+pub fn trigger_broker_rerun(conn: &Connection, broker_id: &str) -> Result<RerunResult> {
+    // Atomic insert: checks broker exists, is enabled, and no pending/running task exists
+    // all within a single SQL statement.
+    let rows = conn.execute(
+        "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+         SELECT b.id, 'pending', b.opt_out_channel, datetime('now')
+         FROM brokers b
+         WHERE b.id = ?1 AND b.enabled = 1
+           AND NOT EXISTS (
+             SELECT 1 FROM opt_out_tasks
+             WHERE broker_id = ?1 AND status IN ('pending', 'running')
+         )",
+        rusqlite::params![broker_id],
+    ).context("Failed to trigger broker rerun")?;
+
+    if rows > 0 {
+        // Task was created — fetch broker name for response
+        let broker_name: String = conn.query_row(
+            "SELECT name FROM brokers WHERE id = ?1",
+            [broker_id],
+            |row| row.get(0),
+        ).context("Failed to get broker name")?;
+        Ok(RerunResult::Created(broker_name))
+    } else {
+        // Zero rows: broker not found, disabled, or already queued.
+        // Disambiguate for accurate error responses.
+        let broker_info: Option<(String, bool)> = conn.query_row(
+            "SELECT name, enabled FROM brokers WHERE id = ?1",
+            [broker_id],
+            |row| Ok((row.get(0)?, row.get::<_, i32>(1)? != 0)),
+        ).optional().context("Failed to query broker")?;
+
+        match broker_info {
+            None => Ok(RerunResult::BrokerNotFound),
+            Some((_, false)) => Ok(RerunResult::BrokerDisabled),
+            Some(_) => Ok(RerunResult::AlreadyQueued),
+        }
+    }
+}
+
+/// Aggregate health statistics for the health page.
+pub struct HealthStats {
+    pub total_brokers: i64,
+    pub active_brokers: i64,
+    pub disabled_brokers: i64,
+    pub pending_tasks: i64,
+    pub broker_health: Vec<BrokerHealthRow>,
+    pub last_run: Option<LastRunRow>,
+    pub emails_today: i32,
+    pub email_limit: i32,
+    pub has_run_data: bool,
+}
+
+pub struct BrokerHealthRow {
+    pub name: String,
+    pub success_rate: f64,
+    pub total_attempts: i64,
+    pub successful: i64,
+}
+
+pub struct LastRunRow {
+    pub started_at: String,
+    pub total: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub captcha_blocked: i64,
+}
+
+/// Returns aggregate health statistics for the dashboard.
+///
+/// Uses a single CTE query for broker/task counts to minimize DB round-trips.
+pub fn get_health_stats(conn: &Connection) -> Result<HealthStats> {
+    // Single query for all aggregate counts
+    let (total_brokers, active_brokers, pending_tasks): (i64, i64, i64) = conn.query_row(
+        "SELECT
+            (SELECT COUNT(*) FROM brokers),
+            (SELECT COUNT(*) FROM brokers WHERE enabled = 1),
+            (SELECT COUNT(*) FROM opt_out_tasks WHERE status IN ('pending', 'running'))",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let disabled_brokers = total_brokers - active_brokers;
+
+    // Per-broker health
+    let mut stmt = conn.prepare(
+        "SELECT b.name,
+                COUNT(t.id) as total_attempts,
+                SUM(CASE WHEN t.status = 'success' THEN 1 ELSE 0 END) as successful
+         FROM brokers b
+         LEFT JOIN opt_out_tasks t ON b.id = t.broker_id
+         GROUP BY b.id, b.name
+         HAVING total_attempts > 0
+         ORDER BY b.name"
+    )?;
+    let broker_health: Vec<BrokerHealthRow> = stmt.query_map([], |row| {
+        let total: i64 = row.get(1)?;
+        let successful: i64 = row.get(2)?;
+        let rate = if total > 0 { (successful as f64 / total as f64) * 100.0 } else { 0.0 };
+        Ok(BrokerHealthRow {
+            name: row.get(0)?,
+            success_rate: rate,
+            total_attempts: total,
+            successful,
+        })
+    })?.collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to query broker health")?;
+
+    // Last run
+    let last_run: Option<LastRunRow> = conn.query_row(
+        "SELECT started_at, total_tasks, succeeded, failed, captcha_blocked
+         FROM run_log
+         ORDER BY id DESC LIMIT 1",
+        [],
+        |row| Ok(LastRunRow {
+            started_at: row.get(0)?,
+            total: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            succeeded: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            captcha_blocked: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+        }),
+    ).optional().context("Failed to query last run")?;
+
+    let has_run_data = last_run.is_some() || !broker_health.is_empty();
+
+    let emails_today = get_daily_email_count(conn)
+        .context("Failed to query daily email count")?;
+
+    Ok(HealthStats {
+        total_brokers,
+        active_brokers,
+        disabled_brokers,
+        pending_tasks,
+        broker_health,
+        last_run,
+        emails_today,
+        email_limit: 10, // Default; caller can override from config
+        has_run_data,
+    })
+}
+
+/// Creates dashboard-specific indexes if they don't already exist.
+pub fn create_dashboard_indexes(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_broker_created ON opt_out_tasks(broker_id, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON opt_out_tasks(status, created_at ASC);
+         CREATE INDEX IF NOT EXISTS idx_tasks_completed_id ON opt_out_tasks(completed_at DESC, id DESC);"
+    ).context("Failed to create dashboard indexes")?;
+    Ok(())
 }
 
 // -- Channel-based writer --
