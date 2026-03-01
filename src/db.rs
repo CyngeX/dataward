@@ -839,8 +839,7 @@ pub fn get_task_history(
                     t.duration_ms, t.proof_path, t.error_message
              FROM opt_out_tasks t
              JOIN brokers b ON t.broker_id = b.id
-             WHERE (t.completed_at < ?1 OR (t.completed_at = ?1 AND t.id < ?2)
-                    OR t.completed_at IS NULL)
+             WHERE (t.completed_at < ?1 OR (t.completed_at = ?1 AND t.id < ?2))
              ORDER BY t.completed_at DESC NULLS LAST, t.id DESC
              LIMIT ?3".to_string(),
             vec![
@@ -897,7 +896,8 @@ pub fn get_captcha_queue(conn: &Connection) -> Result<Vec<CaptchaQueueRow>> {
          FROM opt_out_tasks t
          JOIN brokers b ON t.broker_id = b.id
          WHERE t.status = 'captcha_blocked'
-         ORDER BY t.created_at ASC"
+         ORDER BY t.created_at ASC
+         LIMIT 200"
     )?;
 
     let rows = stmt.query_map([], |row| {

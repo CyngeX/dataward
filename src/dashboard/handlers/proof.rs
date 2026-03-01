@@ -16,11 +16,7 @@ pub async fn serve_proof(
     Path(task_id): Path<String>,
 ) -> Result<Response, DashboardError> {
     // Validate task_id: must be positive integer
-    let task_id: i64 = task_id.parse()
-        .map_err(|_| DashboardError::BadRequest("Invalid task ID".into()))?;
-    if task_id <= 0 {
-        return Err(DashboardError::BadRequest("Invalid task ID".into()));
-    }
+    let task_id = super::parse_positive_id(&task_id)?;
 
     // Look up proof path from database
     let proof_path = {

@@ -141,6 +141,13 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
                 // Create dashboard indexes
                 db::create_dashboard_indexes(&read_conn)?;
 
+                // Precompute token hash for session cookie verification
+                use sha2::Digest;
+                let token_hash = sha2::Sha256::digest(token.as_bytes());
+                let token_hash_b64 = base64::Engine::encode(
+                    &base64::engine::general_purpose::URL_SAFE_NO_PAD, token_hash,
+                );
+
                 let dashboard_state = dashboard::DashboardState {
                     db_path: db_path.clone(),
                     db_hex_key: SecretString::from(hex_key.as_str().to_string()),
@@ -148,9 +155,10 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
                     scheduler_notify: scheduler_notify_tx,
                     master_key: Arc::new(SecretBox::new(Box::new(master_key_bytes))),
                     auth_token: SecretString::from(token),
-                    session_secret,
+                    session_secret: Arc::new(SecretBox::new(Box::new(session_secret.to_vec()))),
+                    token_hash_b64,
                     data_dir: data_dir.to_path_buf(),
-                    login_attempts: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+                    login_attempts: Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new())),
                 };
 
                 let cancel_dashboard = CancellationToken::new();

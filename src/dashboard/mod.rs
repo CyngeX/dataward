@@ -50,12 +50,14 @@ pub struct DashboardState {
     pub master_key: Arc<SecretBox<Vec<u8>>>,
     /// Dashboard auth token (shown to user at init).
     pub auth_token: SecretString,
-    /// Secret key for HMAC session cookie signing.
-    pub session_secret: [u8; 32],
+    /// Secret key for HMAC session cookie signing (zeroized on drop via SecretBox).
+    pub session_secret: Arc<SecretBox<Vec<u8>>>,
+    /// Pre-computed base64(SHA-256(auth_token)) for session cookie verification.
+    pub token_hash_b64: String,
     /// Data directory root (for proof file path resolution).
     pub data_dir: PathBuf,
     /// Login attempt tracker (ip is always 127.0.0.1, so just track timestamps).
-    pub login_attempts: Arc<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>,
+    pub login_attempts: Arc<tokio::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>,
 }
 
 /// Dashboard-specific error type for consistent error responses.
@@ -258,16 +260,25 @@ mod tests {
 
         let master_key = vec![0u8; 32]; // Dummy key for tests
 
+        // Precompute token hash for test state
+        use sha2::Digest;
+        let auth_token_str = "test-token-abc123";
+        let token_hash = sha2::Sha256::digest(auth_token_str.as_bytes());
+        let token_hash_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD, token_hash,
+        );
+
         let state = DashboardState {
             db_path,
             db_hex_key: SecretString::from(hex_key),
             write_tx,
             scheduler_notify: notify_tx,
             master_key: Arc::new(SecretBox::new(Box::new(master_key))),
-            auth_token: SecretString::from("test-token-abc123".to_string()),
-            session_secret: [0u8; 32],
+            auth_token: SecretString::from(auth_token_str.to_string()),
+            session_secret: Arc::new(SecretBox::new(Box::new(vec![0u8; 32]))),
+            token_hash_b64,
             data_dir: dir.path().to_path_buf(),
-            login_attempts: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            login_attempts: Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new())),
         };
 
         (state, dir)

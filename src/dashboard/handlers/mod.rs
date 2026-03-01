@@ -13,6 +13,16 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use super::auth;
 use super::DashboardState;
 
+/// Parses and validates a positive integer ID from a path segment.
+pub(crate) fn parse_positive_id(id: &str) -> Result<i64, super::DashboardError> {
+    let task_id: i64 = id.parse()
+        .map_err(|_| super::DashboardError::BadRequest("Invalid task ID".into()))?;
+    if task_id <= 0 {
+        return Err(super::DashboardError::BadRequest("Invalid task ID".into()));
+    }
+    Ok(task_id)
+}
+
 /// Login page template.
 #[derive(Template)]
 #[template(path = "login.html")]
@@ -56,8 +66,7 @@ pub async fn login_submit(
     // Records the attempt BEFORE CSRF/token verification so that CSRF brute-force
     // attempts also count toward the rate limit.
     {
-        let mut attempts = state.login_attempts.lock()
-            .unwrap_or_else(|e| e.into_inner()); // Recover from poisoned mutex
+        let mut attempts = state.login_attempts.lock().await;
         let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(60);
         while attempts.front().map_or(false, |t| *t < cutoff) {
             attempts.pop_front();

@@ -43,9 +43,14 @@ pub async fn history_page(
     State(state): State<DashboardState>,
     Query(params): Query<HistoryParams>,
 ) -> Result<Response, DashboardError> {
-    let tasks = fetch_task_history(&state, params.cursor_ts, params.cursor_id).await?;
+    let mut tasks = fetch_task_history(&state, params.cursor_ts, params.cursor_id).await?;
 
-    let has_more = tasks.len() == 50;
+    // Fetch limit+1 to detect more pages without a spurious "Next" on exact boundaries.
+    const PAGE_SIZE: usize = 50;
+    let has_more = tasks.len() > PAGE_SIZE;
+    if has_more {
+        tasks.truncate(PAGE_SIZE);
+    }
     let (next_cursor_ts, next_cursor_id) = if has_more {
         tasks.last().map(|t| (Some(t.completed_at.clone().unwrap_or_default()), Some(t.id))).unwrap_or_default()
     } else {
@@ -76,7 +81,7 @@ async fn fetch_task_history(
     let state = state.clone();
     tokio::task::spawn_blocking(move || {
         let conn = open_dashboard_db(&state)?;
-        let rows = db::get_task_history(&conn, cursor_ts.as_deref(), cursor_id, 50)
+        let rows = db::get_task_history(&conn, cursor_ts.as_deref(), cursor_id, 51)
             .map_err(|e| DashboardError::Internal(format!("Query error: {}", e)))?;
 
         Ok(rows.into_iter().map(|row| {

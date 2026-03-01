@@ -85,11 +85,7 @@ pub async fn resolve_captcha(
     auth::verify_csrf(&request)?;
 
     // Validate task ID
-    let task_id: i64 = id.parse()
-        .map_err(|_| DashboardError::BadRequest("Invalid task ID".into()))?;
-    if task_id <= 0 {
-        return Err(DashboardError::BadRequest("Invalid task ID".into()));
-    }
+    let task_id = super::parse_positive_id(&id)?;
 
     let state_clone = state.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -129,11 +125,7 @@ pub async fn abandon_captcha(
     auth::verify_csrf(&request)?;
 
     // Validate task ID
-    let task_id: i64 = id.parse()
-        .map_err(|_| DashboardError::BadRequest("Invalid task ID".into()))?;
-    if task_id <= 0 {
-        return Err(DashboardError::BadRequest("Invalid task ID".into()));
-    }
+    let task_id = super::parse_positive_id(&id)?;
 
     let result = tokio::task::spawn_blocking({
         let state = state.clone();

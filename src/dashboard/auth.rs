@@ -211,15 +211,12 @@ pub fn csrf_cookie_header(token: &str) -> String {
 ///
 /// Format: `base64(token_hash):base64(hmac):expiry_timestamp`
 pub fn create_session_cookie(state: &DashboardState) -> Result<String, super::DashboardError> {
-    use sha2::Digest;
-
-    let token_hash = sha2::Sha256::digest(state.auth_token.expose_secret().as_bytes());
-    let token_hash_b64 = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, token_hash);
+    let token_hash_b64 = &state.token_hash_b64;
 
     let expiry = chrono::Utc::now().timestamp() + SESSION_MAX_AGE_SECS;
     let payload = format!("{}:{}", token_hash_b64, expiry);
 
-    let mut mac = HmacSha256::new_from_slice(&state.session_secret)
+    let mut mac = HmacSha256::new_from_slice(state.session_secret.expose_secret())
         .map_err(|e| super::DashboardError::Internal(format!("HMAC error: {}", e)))?;
     mac.update(payload.as_bytes());
     let signature = mac.finalize().into_bytes();
@@ -248,8 +245,6 @@ pub fn clear_session_cookie_header() -> String {
 ///
 /// Checks: HMAC signature valid, token hash matches, not expired.
 fn verify_session_cookie(cookie_value: &str, state: &DashboardState) -> bool {
-    use sha2::Digest;
-
     // Format: token_hash_b64:expiry.signature_b64
     let parts: Vec<&str> = cookie_value.rsplitn(2, '.').collect();
     if parts.len() != 2 {
@@ -259,7 +254,7 @@ fn verify_session_cookie(cookie_value: &str, state: &DashboardState) -> bool {
     let payload = parts[1];
 
     // Verify HMAC signature
-    let mut mac = match HmacSha256::new_from_slice(&state.session_secret) {
+    let mut mac = match HmacSha256::new_from_slice(state.session_secret.expose_secret()) {
         Ok(m) => m,
         Err(_) => return false,
     };
@@ -293,19 +288,19 @@ fn verify_session_cookie(cookie_value: &str, state: &DashboardState) -> bool {
         return false;
     }
 
-    // Check token hash matches
-    let expected_hash = sha2::Sha256::digest(state.auth_token.expose_secret().as_bytes());
-    let expected_hash_b64 = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, expected_hash);
-
-    constant_time_eq(token_hash_b64.as_bytes(), expected_hash_b64.as_bytes())
+    // Check token hash matches (precomputed at startup)
+    constant_time_eq(token_hash_b64.as_bytes(), state.token_hash_b64.as_bytes())
 }
 
 /// Constant-time string comparison using the `subtle` crate.
+///
+/// Hashes both sides with SHA-256 before comparing to prevent leaking
+/// the expected value's length via timing side-channel.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.ct_eq(b).into()
+    use sha2::Digest;
+    let ha = sha2::Sha256::digest(a);
+    let hb = sha2::Sha256::digest(b);
+    ha.ct_eq(&hb).into()
 }
 
 /// Constant-time token comparison.
