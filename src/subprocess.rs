@@ -257,28 +257,41 @@ impl SubprocessManager {
     }
 }
 
-/// Finds the worker script path.
+/// Finds the worker script path using explicit 3-tier precedence.
 ///
-/// Searches for `worker/dist/worker.js` relative to the binary's directory
-/// and the project root.
+/// Search order:
+/// 1. `DATAWARD_WORKER_PATH` env var (explicit override)
+/// 2. Adjacent to executable / project root (development)
+/// 3. `data_dir/worker/dist/worker.js` (production — extracted by `dataward init`)
 fn find_worker_script(data_dir: &Path) -> Result<PathBuf> {
-    // Try relative to the current executable
+    // Tier 1: Explicit env var override
+    if let Ok(env_path) = std::env::var("DATAWARD_WORKER_PATH") {
+        let path = PathBuf::from(&env_path);
+        if path.exists() {
+            if !env_path.ends_with("worker.js") {
+                tracing::warn!(
+                    path = %env_path,
+                    "DATAWARD_WORKER_PATH does not end with 'worker.js' — ensure it points to the correct script"
+                );
+            }
+            tracing::info!(path = %path.display(), tier = "env-override", "Worker script found");
+            return Ok(path);
+        }
+        tracing::warn!(
+            path = %env_path,
+            "DATAWARD_WORKER_PATH set but file not found, falling through to other tiers"
+        );
+    }
+
+    // Tier 2: Adjacent to executable (development builds)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let script = exe_dir.join("worker/dist/worker.js");
-            if script.exists() {
-                return Ok(script);
-            }
-            // Try one level up (common in cargo builds: target/debug/dataward)
-            if let Some(parent) = exe_dir.parent() {
-                let script = parent.join("worker/dist/worker.js");
-                if script.exists() {
-                    return Ok(script);
-                }
-                // Try two levels up (target/debug -> target -> project root)
-                if let Some(grandparent) = parent.parent() {
-                    let script = grandparent.join("worker/dist/worker.js");
+            // Direct sibling, one level up, two levels up (target/debug → project root)
+            for ancestor in [Some(exe_dir), exe_dir.parent(), exe_dir.parent().and_then(|p| p.parent())] {
+                if let Some(dir) = ancestor {
+                    let script = dir.join("worker/dist/worker.js");
                     if script.exists() {
+                        tracing::info!(path = %script.display(), tier = "development", "Worker script found");
                         return Ok(script);
                     }
                 }
@@ -286,21 +299,27 @@ fn find_worker_script(data_dir: &Path) -> Result<PathBuf> {
         }
     }
 
-    // Try relative to current working directory
+    // Also check CWD for development convenience
     let cwd_script = PathBuf::from("worker/dist/worker.js");
     if cwd_script.exists() {
+        tracing::info!(path = %cwd_script.display(), tier = "development-cwd", "Worker script found");
         return Ok(cwd_script);
     }
 
-    // Try in data_dir
+    // Tier 3: Production path (extracted by dataward init)
     let data_script = data_dir.join("worker/dist/worker.js");
     if data_script.exists() {
+        tracing::info!(path = %data_script.display(), tier = "production", "Worker script found");
         return Ok(data_script);
     }
 
     anyhow::bail!(
-        "Worker script not found. Expected at worker/dist/worker.js. \
-         Run `cd worker && npm run build` to compile the TypeScript worker."
+        "Worker script not found. Run `dataward init` to set up the worker runtime.\n\
+         Checked locations:\n\
+         - DATAWARD_WORKER_PATH env var (not set or file missing)\n\
+         - Adjacent to binary (development builds)\n\
+         - {} (production)",
+        data_script.display(),
     )
 }
 

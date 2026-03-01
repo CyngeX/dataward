@@ -3,6 +3,7 @@ mod config;
 mod crypto;
 mod dashboard;
 mod db;
+mod download;
 mod init;
 mod logging;
 mod api_worker;
@@ -10,6 +11,7 @@ mod email_worker;
 mod orchestrator;
 mod scheduler;
 mod subprocess;
+mod worker_setup;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -38,11 +40,25 @@ enum Commands {
     },
     /// Show current status of all brokers and pending tasks
     Status,
+    /// Playbook management commands
+    Playbook {
+        #[command(subcommand)]
+        command: PlaybookCommands,
+    },
     /// Delete all user data, proofs, and database
     Purge {
         /// Skip confirmation prompt
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlaybookCommands {
+    /// Validate a playbook YAML file against the schema
+    Validate {
+        /// Path to the playbook YAML file
+        file: PathBuf,
     },
 }
 
@@ -81,6 +97,27 @@ async fn main() -> Result<()> {
             require_initialized(&data_dir)?;
             // Phase 6: status implementation
             eprintln!("Status command not yet implemented (Phase 6)");
+        }
+        Commands::Playbook { command } => {
+            match command {
+                PlaybookCommands::Validate { file } => {
+                    match broker_registry::validate_playbook_file(&file) {
+                        Ok(playbook) => {
+                            eprintln!("VALID: {} ({})", playbook.broker.name, playbook.broker.id);
+                            eprintln!("  Category: {}", playbook.broker.category);
+                            eprintln!("  Channel: {}", playbook.broker.opt_out_channel);
+                            eprintln!("  Steps: {}", playbook.steps.len());
+                            eprintln!("  Required fields: {}", playbook.required_fields.join(", "));
+                            eprintln!("  Allowed domains: {}", playbook.broker.allowed_domains.join(", "));
+                        }
+                        Err(e) => {
+                            eprintln!("INVALID: {}", file.display());
+                            eprintln!("  Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
         }
         Commands::Purge { force } => {
             init::run_purge(&data_dir, force).await?;

@@ -143,6 +143,14 @@ pub enum PlaybookStep {
 
 /// Loads and validates all playbooks from the playbooks directory.
 ///
+/// Validates a single playbook file and returns it if valid.
+///
+/// This is the public entry point for the `dataward playbook validate` CLI command.
+/// The trust tier defaults to "local" for standalone validation.
+pub fn validate_playbook_file(path: &Path) -> Result<Playbook> {
+    load_and_validate_playbook(path, "local")
+}
+
 /// Returns validated playbooks grouped by trust tier. Invalid playbooks
 /// are logged as warnings but don't block loading of valid ones.
 pub fn load_playbooks(playbooks_dir: &Path) -> Result<Vec<Playbook>> {
@@ -799,5 +807,89 @@ steps:
             ),
             Err(_) => {} // Returning an error is also acceptable
         }
+    }
+
+    #[test]
+    fn test_validate_playbook_file_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_playbook(dir.path(), "local", "test", &valid_playbook_yaml());
+        let result = validate_playbook_file(&path);
+        assert!(result.is_ok(), "Valid playbook should pass: {:?}", result.err());
+        let playbook = result.unwrap();
+        assert_eq!(playbook.broker.id, "testbroker");
+        assert_eq!(playbook.trust_tier, "local");
+    }
+
+    #[test]
+    fn test_validate_playbook_file_missing_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+broker:
+  id: test
+  name: Test
+  url: https://test.com
+  category: people_search
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains: [test.com]
+
+steps:
+  - navigate: "https://test.com/optout"
+"#;
+        let path = dir.path().join("bad.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let result = validate_playbook_file(&path);
+        assert!(result.is_err(), "Missing required_fields should fail");
+    }
+
+    #[test]
+    fn test_validate_playbook_file_empty_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+broker:
+  id: test
+  name: Test
+  url: https://test.com
+  category: people_search
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains: [test.com]
+
+required_fields: [email]
+steps: []
+"#;
+        let path = dir.path().join("empty_steps.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let result = validate_playbook_file(&path);
+        assert!(result.is_err(), "Empty steps should fail");
+    }
+
+    #[test]
+    fn test_validate_playbook_file_invalid_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+broker:
+  id: test
+  name: Test
+  url: https://test.com
+  category: invalid_cat
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains: [test.com]
+
+required_fields: [email]
+steps:
+  - navigate: "https://test.com/optout"
+"#;
+        let path = dir.path().join("bad_cat.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let result = validate_playbook_file(&path);
+        assert!(result.is_err(), "Invalid category should fail");
+    }
+
+    #[test]
+    fn test_validate_playbook_file_nonexistent() {
+        let result = validate_playbook_file(Path::new("/nonexistent/playbook.yaml"));
+        assert!(result.is_err(), "Nonexistent file should fail");
     }
 }

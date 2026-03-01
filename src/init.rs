@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::{broker_registry, config::Config, crypto, db};
+use crate::{broker_registry, config::Config, crypto, db, worker_setup};
 
 /// Valid PII field names for user profile.
 const PROFILE_FIELDS: &[(&str, &str, bool)] = &[
@@ -118,7 +118,21 @@ pub async fn run_init(data_dir: &Path) -> Result<()> {
     // Step 6: Write default config
     Config::write_default(data_dir)?;
 
-    // Step 7: Create playbook directories
+    // Step 7: Set up worker runtime (Node.js check, extract worker, install deps, browser)
+    eprintln!();
+    match worker_setup::setup_worker(data_dir) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!();
+            eprintln!("WARNING: Worker setup failed: {}", e);
+            eprintln!("  Browser-based opt-outs will not work until the worker is set up.");
+            eprintln!("  You can retry by running `dataward init` again.");
+            eprintln!("  Email and API opt-outs will still work.");
+            eprintln!();
+        }
+    }
+
+    // Step 8: Create playbook directories and extract official playbooks
     let playbooks_dir = data_dir.join("playbooks");
     for tier in &["official", "community", "local"] {
         let tier_dir = playbooks_dir.join(tier);
@@ -130,7 +144,7 @@ pub async fn run_init(data_dir: &Path) -> Result<()> {
         }
     }
 
-    // Step 8: Create proofs and logs directories
+    // Step 9: Create proofs and logs directories
     for dir_name in &["proofs", "logs"] {
         let dir = data_dir.join(dir_name);
         std::fs::create_dir_all(&dir)?;
@@ -141,7 +155,7 @@ pub async fn run_init(data_dir: &Path) -> Result<()> {
         }
     }
 
-    // Step 9: Load and validate any bundled playbooks
+    // Step 10: Load and validate any bundled playbooks
     let playbooks = broker_registry::load_playbooks(&playbooks_dir)?;
     if !playbooks.is_empty() {
         broker_registry::sync_brokers_to_db(&conn, &playbooks)?;
