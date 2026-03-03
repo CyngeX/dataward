@@ -15,7 +15,8 @@ use super::DashboardState;
 
 /// Parses and validates a positive integer ID from a path segment.
 pub(crate) fn parse_positive_id(id: &str) -> Result<i64, super::DashboardError> {
-    let task_id: i64 = id.parse()
+    let task_id: i64 = id
+        .parse()
         .map_err(|_| super::DashboardError::BadRequest("Invalid task ID".into()))?;
     if task_id <= 0 {
         return Err(super::DashboardError::BadRequest("Invalid task ID".into()));
@@ -41,13 +42,15 @@ pub async fn login_page(
         csrf_token: csrf_token.clone(),
     };
 
-    let html = template.render()
+    let html = template
+        .render()
         .map_err(|e| super::DashboardError::Internal(format!("Template error: {}", e)))?;
 
     Ok((
         [(header::SET_COOKIE, auth::csrf_cookie_header(&csrf_token))],
         Html(html),
-    ).into_response())
+    )
+        .into_response())
 }
 
 /// Login form data.
@@ -79,13 +82,15 @@ pub async fn login_submit(
     }
 
     // Extract cookie header before consuming the request body
-    let cookie_header = request.headers()
+    let cookie_header = request
+        .headers()
         .get(axum::http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
     // Parse form body (consumes request)
-    let body_bytes = axum::body::to_bytes(request.into_body(), 4096).await
+    let body_bytes = axum::body::to_bytes(request.into_body(), 4096)
+        .await
         .map_err(|_| super::DashboardError::BadRequest("Invalid form data".into()))?;
     let form: LoginForm = serde_urlencoded::from_bytes(&body_bytes)
         .map_err(|_| super::DashboardError::BadRequest("Invalid form data".into()))?;
@@ -113,14 +118,16 @@ pub async fn login_submit(
             error: Some("Invalid token".into()),
             csrf_token: csrf_token.clone(),
         };
-        let html = template.render()
+        let html = template
+            .render()
             .map_err(|e| super::DashboardError::Internal(format!("Template error: {}", e)))?;
 
         return Ok((
             axum::http::StatusCode::UNAUTHORIZED,
             [(header::SET_COOKIE, auth::csrf_cookie_header(&csrf_token))],
             Html(html),
-        ).into_response());
+        )
+            .into_response());
     }
 
     // Create session cookie
@@ -131,11 +138,15 @@ pub async fn login_submit(
 
     Ok((
         [
-            (header::SET_COOKIE, auth::session_cookie_header(&session_value)),
+            (
+                header::SET_COOKIE,
+                auth::session_cookie_header(&session_value),
+            ),
             (header::SET_COOKIE, auth::csrf_cookie_header(&csrf_token)),
         ],
         Redirect::to("/"),
-    ).into_response())
+    )
+        .into_response())
 }
 
 /// Handles logout (clears session).
@@ -143,7 +154,8 @@ pub async fn logout() -> Response {
     (
         [(header::SET_COOKIE, auth::clear_session_cookie_header())],
         Redirect::to("/login"),
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// Serves vendored htmx.min.js with immutable caching.
@@ -156,5 +168,6 @@ pub async fn serve_htmx() -> Response {
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         HTMX_JS,
-    ).into_response()
+    )
+        .into_response()
 }

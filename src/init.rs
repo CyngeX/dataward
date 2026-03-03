@@ -72,8 +72,7 @@ pub async fn run_init(data_dir: &Path) -> Result<()> {
 
     // Store the salt in a separate file (not sensitive — only useful with passphrase)
     let salt_path = data_dir.join(".salt");
-    std::fs::write(&salt_path, &salt)
-        .context("Failed to write salt file")?;
+    std::fs::write(&salt_path, &salt).context("Failed to write salt file")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -178,8 +177,7 @@ pub async fn run_init(data_dir: &Path) -> Result<()> {
 /// Updates PII fields in an existing installation.
 async fn run_update_pii(data_dir: &Path) -> Result<()> {
     let passphrase = crypto::get_passphrase("Passphrase: ")?;
-    let salt = std::fs::read(data_dir.join(".salt"))
-        .context("Failed to read salt file")?;
+    let salt = std::fs::read(data_dir.join(".salt")).context("Failed to read salt file")?;
     let conn = db::open_db(&data_dir.join("dataward.db"), &passphrase, &salt)?;
 
     eprintln!("Enter new values (leave blank to keep existing):");
@@ -215,7 +213,10 @@ async fn run_update_pii(data_dir: &Path) -> Result<()> {
 /// Runs the `dataward purge` command.
 pub async fn run_purge(data_dir: &Path, force: bool) -> Result<()> {
     if !data_dir.exists() {
-        eprintln!("Nothing to purge — data directory does not exist: {}", data_dir.display());
+        eprintln!(
+            "Nothing to purge — data directory does not exist: {}",
+            data_dir.display()
+        );
         return Ok(());
     }
 
@@ -301,7 +302,10 @@ fn validate_field_value(field_name: &str, value: &str) -> Result<()> {
             }
         }
         "zip" => {
-            let cleaned: String = value.chars().filter(|c| c.is_ascii_digit() || *c == '-').collect();
+            let cleaned: String = value
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
             if cleaned.len() < 3 || cleaned.len() > 10 {
                 anyhow::bail!("Invalid ZIP code format");
             }
@@ -339,8 +343,8 @@ fn collect_smtp_credentials(conn: &rusqlite::Connection) -> Result<()> {
     io::stdin().read_line(&mut username)?;
     let username = username.trim();
 
-    let password = rpassword::prompt_password("  SMTP password: ")
-        .context("Failed to read SMTP password")?;
+    let password =
+        rpassword::prompt_password("  SMTP password: ").context("Failed to read SMTP password")?;
 
     // Store in encrypted DB
     db::set_config(conn, "smtp_server", server)?;
@@ -489,18 +493,27 @@ mod tests {
     #[test]
     fn test_validate_email_error_message() {
         let err = validate_field_value("email", "notanemail").unwrap_err();
-        assert!(err.to_string().contains("email"), "Expected email validation error");
+        assert!(
+            err.to_string().contains("email"),
+            "Expected email validation error"
+        );
     }
 
     #[test]
     fn test_validate_phone_error_message() {
         let err = validate_field_value("phone", "123").unwrap_err();
-        assert!(err.to_string().contains("digit"), "Expected phone digit count error");
+        assert!(
+            err.to_string().contains("digit"),
+            "Expected phone digit count error"
+        );
     }
 
     #[test]
     fn test_validate_zip_error_message() {
         let err = validate_field_value("zip", "AB").unwrap_err();
-        assert!(err.to_string().contains("ZIP"), "Expected ZIP validation error");
+        assert!(
+            err.to_string().contains("ZIP"),
+            "Expected ZIP validation error"
+        );
     }
 }

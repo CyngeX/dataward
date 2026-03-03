@@ -92,7 +92,7 @@ pub fn check_nodejs() -> Result<()> {
          Or via package manager:\n\
          - macOS: brew install node\n\
          - Ubuntu/Debian: sudo apt install nodejs\n\
-         - Arch Linux: sudo pacman -S nodejs"
+         - Arch Linux: sudo pacman -S nodejs",
     )?;
 
     if !output.status.success() {
@@ -123,9 +123,12 @@ pub fn check_nodejs() -> Result<()> {
 /// Parses the major version from a Node.js version string (e.g., "v20.11.0" → 20).
 fn parse_node_major_version(version: &str) -> Result<u32> {
     let stripped = version.strip_prefix('v').unwrap_or(version);
-    let major_str = stripped.split('.').next()
+    let major_str = stripped
+        .split('.')
+        .next()
         .ok_or_else(|| anyhow::anyhow!("Cannot parse Node.js version: {}", version))?;
-    major_str.parse::<u32>()
+    major_str
+        .parse::<u32>()
         .with_context(|| format!("Cannot parse Node.js major version from: {}", version))
 }
 
@@ -195,8 +198,9 @@ fn extract_worker_tarball(data_dir: &Path) -> Result<()> {
 
         // Remove any previous partial extraction
         if tmp_dir.exists() {
-            std::fs::remove_dir_all(&tmp_dir)
-                .with_context(|| format!("Failed to remove partial extraction: {}", tmp_dir.display()))?;
+            std::fs::remove_dir_all(&tmp_dir).with_context(|| {
+                format!("Failed to remove partial extraction: {}", tmp_dir.display())
+            })?;
         }
 
         // Verify embedded tarball integrity
@@ -256,8 +260,9 @@ fn extract_worker_tarball(data_dir: &Path) -> Result<()> {
             if old_dir.exists() {
                 let _ = std::fs::remove_dir_all(&old_dir);
             }
-            std::fs::rename(&worker_dir, &old_dir)
-                .with_context(|| format!("Failed to move old worker aside: {}", worker_dir.display()))?;
+            std::fs::rename(&worker_dir, &old_dir).with_context(|| {
+                format!("Failed to move old worker aside: {}", worker_dir.display())
+            })?;
         }
 
         if let Err(e) = std::fs::rename(&tmp_dir, &worker_dir) {
@@ -292,7 +297,10 @@ fn extract_worker_tarball(data_dir: &Path) -> Result<()> {
 fn validate_archive_entry_path(path: &Path) -> Result<()> {
     // Reject absolute paths
     if path.is_absolute() {
-        anyhow::bail!("Tarball contains absolute path (rejected): {}", path.display());
+        anyhow::bail!(
+            "Tarball contains absolute path (rejected): {}",
+            path.display()
+        );
     }
 
     // Reject paths with null bytes (check raw bytes to handle non-UTF-8 paths)
@@ -354,10 +362,12 @@ fn run_npm_ci(worker_dir: &Path) -> Result<()> {
         NPM_CI_TIMEOUT,
         "npm ci",
     )
-    .with_context(|| format!(
-        "Failed to run npm ci in {}. Is npm installed?",
-        worker_dir.display()
-    ))?;
+    .with_context(|| {
+        format!(
+            "Failed to run npm ci in {}. Is npm installed?",
+            worker_dir.display()
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -465,7 +475,8 @@ fn run_command_with_timeout(
     timeout: Duration,
     description: &str,
 ) -> Result<std::process::Output> {
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("Failed to spawn: {}", description))?;
 
     // Take ownership of piped streams and read them in background threads
@@ -502,11 +513,7 @@ fn run_command_with_timeout(
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    anyhow::bail!(
-                        "{} timed out after {}s",
-                        description,
-                        timeout.as_secs()
-                    );
+                    anyhow::bail!("{} timed out after {}s", description, timeout.as_secs());
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -516,7 +523,11 @@ fn run_command_with_timeout(
     let stdout = stdout_thread.join().unwrap_or_default();
     let stderr = stderr_thread.join().unwrap_or_default();
 
-    Ok(std::process::Output { status, stdout, stderr })
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[cfg(test)]
@@ -586,10 +597,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let worker_dir = dir.path().join("worker");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::write(
-            worker_dir.join(SENTINEL_FILE),
-            get_embedded_hash(),
-        ).unwrap();
+        std::fs::write(worker_dir.join(SENTINEL_FILE), get_embedded_hash()).unwrap();
         assert!(!needs_extraction(&worker_dir).unwrap());
     }
 
@@ -601,7 +609,8 @@ mod tests {
         std::fs::write(
             worker_dir.join(SENTINEL_FILE),
             "old-hash-that-no-longer-matches",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(needs_extraction(&worker_dir).unwrap());
     }
 
@@ -612,7 +621,11 @@ mod tests {
         let result = acquire_init_lock(dir.path());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("in progress"), "Error should mention concurrent: {}", err);
+        assert!(
+            err.contains("in progress"),
+            "Error should mention concurrent: {}",
+            err
+        );
     }
 
     #[test]
@@ -639,7 +652,11 @@ mod tests {
 
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.trim().contains("hello"), "stdout should contain 'hello': {}", stdout);
+        assert!(
+            stdout.trim().contains("hello"),
+            "stdout should contain 'hello': {}",
+            stdout
+        );
     }
 
     #[test]
@@ -655,7 +672,11 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("timed out"), "Error should mention timeout: {}", err);
+        assert!(
+            err.contains("timed out"),
+            "Error should mention timeout: {}",
+            err
+        );
     }
 
     #[test]
@@ -672,7 +693,11 @@ mod tests {
 
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("errdata"), "stderr should contain 'errdata': {}", stderr);
+        assert!(
+            stderr.contains("errdata"),
+            "stderr should contain 'errdata': {}",
+            stderr
+        );
     }
 
     #[test]
@@ -688,6 +713,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let nonexistent = dir.path().join("no-such-dir");
         let result = run_patchright_install(&nonexistent);
-        assert!(result.is_err(), "patchright install in nonexistent dir should fail");
+        assert!(
+            result.is_err(),
+            "patchright install in nonexistent dir should fail"
+        );
     }
 }

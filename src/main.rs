@@ -1,13 +1,13 @@
+mod api_worker;
 mod broker_registry;
 mod config;
 mod crypto;
 mod dashboard;
 mod db;
 mod download;
+mod email_worker;
 mod init;
 mod logging;
-mod api_worker;
-mod email_worker;
 mod orchestrator;
 mod scheduler;
 mod subprocess;
@@ -18,7 +18,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "dataward", version, about = "Automated data broker opt-out daemon")]
+#[command(
+    name = "dataward",
+    version,
+    about = "Automated data broker opt-out daemon"
+)]
 struct Cli {
     /// Path to data directory (default: ~/.dataward)
     #[arg(long, global = true)]
@@ -66,7 +70,8 @@ fn data_dir(cli_override: Option<&PathBuf>) -> Result<PathBuf> {
     if let Some(dir) = cli_override {
         return Ok(dir.clone());
     }
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
     Ok(home.join(".dataward"))
 }
 
@@ -98,27 +103,28 @@ async fn main() -> Result<()> {
             // Phase 6: status implementation
             eprintln!("Status command not yet implemented (Phase 6)");
         }
-        Commands::Playbook { command } => {
-            match command {
-                PlaybookCommands::Validate { file } => {
-                    match broker_registry::validate_playbook_file(&file) {
-                        Ok(playbook) => {
-                            eprintln!("VALID: {} ({})", playbook.broker.name, playbook.broker.id);
-                            eprintln!("  Category: {}", playbook.broker.category);
-                            eprintln!("  Channel: {}", playbook.broker.opt_out_channel);
-                            eprintln!("  Steps: {}", playbook.steps.len());
-                            eprintln!("  Required fields: {}", playbook.required_fields.join(", "));
-                            eprintln!("  Allowed domains: {}", playbook.broker.allowed_domains.join(", "));
-                        }
-                        Err(e) => {
-                            eprintln!("INVALID: {}", file.display());
-                            eprintln!("  Error: {}", e);
-                            std::process::exit(1);
-                        }
+        Commands::Playbook { command } => match command {
+            PlaybookCommands::Validate { file } => {
+                match broker_registry::validate_playbook_file(&file) {
+                    Ok(playbook) => {
+                        eprintln!("VALID: {} ({})", playbook.broker.name, playbook.broker.id);
+                        eprintln!("  Category: {}", playbook.broker.category);
+                        eprintln!("  Channel: {}", playbook.broker.opt_out_channel);
+                        eprintln!("  Steps: {}", playbook.steps.len());
+                        eprintln!("  Required fields: {}", playbook.required_fields.join(", "));
+                        eprintln!(
+                            "  Allowed domains: {}",
+                            playbook.broker.allowed_domains.join(", ")
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("INVALID: {}", file.display());
+                        eprintln!("  Error: {}", e);
+                        std::process::exit(1);
                     }
                 }
             }
-        }
+        },
         Commands::Purge { force } => {
             init::run_purge(&data_dir, force).await?;
         }

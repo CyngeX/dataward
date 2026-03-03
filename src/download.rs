@@ -16,8 +16,7 @@ pub fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<()> {
     // whether the hash was the right length. ct_eq on differing-length slices
     // returns 0 (unequal), and hex::decode errors surface naturally for invalid input.
     use subtle::ConstantTimeEq;
-    let actual_bytes = hex::decode(&actual_hex)
-        .context("BUG: hex::encode produced invalid hex")?;
+    let actual_bytes = hex::decode(&actual_hex).context("BUG: hex::encode produced invalid hex")?;
     let expected_bytes = match hex::decode(expected_hex) {
         Ok(b) => b,
         Err(_) => {
@@ -58,7 +57,8 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     let mut buf = [0u8; 64 * 1024];
 
     loop {
-        let n = reader.read(&mut buf)
+        let n = reader
+            .read(&mut buf)
             .with_context(|| format!("Failed to read file for checksum: {}", path.display()))?;
         if n == 0 {
             break;
@@ -76,14 +76,18 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 /// the rename is atomic (same mount point). If the write or rename fails,
 /// the temp file is cleaned up.
 pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
-    let parent = target.parent()
+    let parent = target
+        .parent()
         .ok_or_else(|| anyhow::anyhow!("Target path has no parent: {}", target.display()))?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
 
     let tmp_name = format!(
         "{}.{}.{:?}.tmp",
-        target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        target
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default(),
         std::process::id(),
         std::thread::current().id(),
     );
@@ -102,8 +106,13 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
         .with_context(|| format!("Failed to sync temp file: {}", tmp_path.display()))?;
     drop(file);
 
-    std::fs::rename(&tmp_path, target)
-        .with_context(|| format!("Failed to rename {} -> {}", tmp_path.display(), target.display()))?;
+    std::fs::rename(&tmp_path, target).with_context(|| {
+        format!(
+            "Failed to rename {} -> {}",
+            tmp_path.display(),
+            target.display()
+        )
+    })?;
 
     // Rename succeeded — defuse the guard so it doesn't delete the target.
     let _ = scopeguard::ScopeGuard::into_inner(_guard);
@@ -129,13 +138,19 @@ mod tests {
     fn test_sha256_hex_known_value() {
         // SHA-256 of empty string
         let hash = sha256_hex(b"");
-        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
     fn test_sha256_hex_hello() {
         let hash = sha256_hex(b"hello");
-        assert_eq!(hash, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+        assert_eq!(
+            hash,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 
     #[test]
@@ -148,10 +163,17 @@ mod tests {
     #[test]
     fn test_verify_sha256_wrong_hash() {
         let data = b"test data";
-        let result = verify_sha256(data, "0000000000000000000000000000000000000000000000000000000000000000");
+        let result = verify_sha256(
+            data,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("checksum mismatch"), "Error should mention mismatch: {}", err);
+        assert!(
+            err.contains("checksum mismatch"),
+            "Error should mention mismatch: {}",
+            err
+        );
     }
 
     #[test]
@@ -186,7 +208,10 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
 
         let hash = sha256_file(&path).unwrap();
-        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
@@ -222,9 +247,17 @@ mod tests {
         let tmp_files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "tmp").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "tmp")
+                    .unwrap_or(false)
+            })
             .collect();
-        assert!(tmp_files.is_empty(), "No .tmp files should remain after successful write");
+        assert!(
+            tmp_files.is_empty(),
+            "No .tmp files should remain after successful write"
+        );
     }
 
     #[test]
@@ -251,6 +284,9 @@ mod tests {
         let target = dir.path().join("should_not_exist.bin");
         let result = atomic_write_verified(&target, b"data", "bad_hash");
         assert!(result.is_err());
-        assert!(!target.exists(), "Target should not exist after checksum failure");
+        assert!(
+            !target.exists(),
+            "Target should not exist after checksum failure"
+        );
     }
 }

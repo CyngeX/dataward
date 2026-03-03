@@ -39,17 +39,14 @@ struct SmtpConfig {
 
 /// Loads SMTP configuration from the database.
 fn load_smtp_config(conn: &Connection) -> Result<SmtpConfig> {
-    let server = db::get_config(conn, "smtp_server")?
-        .ok_or_else(|| anyhow::anyhow!("SMTP not configured. Run `dataward init` to set up SMTP."))?;
-    let port_str = db::get_config(conn, "smtp_port")?
-        .unwrap_or_else(|| "587".to_string());
-    let port: u16 = port_str.parse()
-        .context("Invalid SMTP port")?;
+    let server = db::get_config(conn, "smtp_server")?.ok_or_else(|| {
+        anyhow::anyhow!("SMTP not configured. Run `dataward init` to set up SMTP.")
+    })?;
+    let port_str = db::get_config(conn, "smtp_port")?.unwrap_or_else(|| "587".to_string());
+    let port: u16 = port_str.parse().context("Invalid SMTP port")?;
     // CONS-R2-007: Fail loudly on missing/empty SMTP credentials
-    let username = db::get_config(conn, "smtp_username")?
-        .unwrap_or_default();
-    let password = db::get_config(conn, "smtp_password")?
-        .unwrap_or_default();
+    let username = db::get_config(conn, "smtp_username")?.unwrap_or_default();
+    let password = db::get_config(conn, "smtp_password")?.unwrap_or_default();
     if username.is_empty() || password.is_empty() {
         anyhow::bail!(
             "SMTP credentials not configured (username or password is empty). \
@@ -57,7 +54,12 @@ fn load_smtp_config(conn: &Connection) -> Result<SmtpConfig> {
         );
     }
 
-    Ok(SmtpConfig { server, port, username, password: Zeroizing::new(password) })
+    Ok(SmtpConfig {
+        server,
+        port,
+        username,
+        password: Zeroizing::new(password),
+    })
 }
 
 /// Sends an opt-out email for a broker.
@@ -118,9 +120,13 @@ pub async fn send_opt_out_email(
     };
 
     // Build email content
-    let from_email = user_data.get("email")
+    let from_email = user_data
+        .get("email")
         .ok_or_else(|| anyhow::anyhow!("Email address not set in profile"))?;
-    let first_name = user_data.get("first_name").map(|s| s.as_str()).unwrap_or("User");
+    let first_name = user_data
+        .get("first_name")
+        .map(|s| s.as_str())
+        .unwrap_or("User");
     let last_name = user_data.get("last_name").map(|s| s.as_str()).unwrap_or("");
 
     // Sanitize inputs to prevent CRLF injection in email headers
@@ -128,7 +134,10 @@ pub async fn send_opt_out_email(
     let safe_to = sanitize_email_header(broker_email);
     let safe_name = sanitize_email_header(&format!("{} {}", first_name, last_name));
 
-    let subject = format!("Data Removal Request — {}", sanitize_email_header(broker_name));
+    let subject = format!(
+        "Data Removal Request — {}",
+        sanitize_email_header(broker_name)
+    );
 
     let body = build_opt_out_email_body(
         first_name,
@@ -143,10 +152,12 @@ pub async fn send_opt_out_email(
     );
 
     let email = Message::builder()
-        .from(format!("{} <{}>", safe_name, safe_from).parse()
-            .context("Invalid from address")?)
-        .to(safe_to.parse()
-            .context("Invalid broker email address")?)
+        .from(
+            format!("{} <{}>", safe_name, safe_from)
+                .parse()
+                .context("Invalid from address")?,
+        )
+        .to(safe_to.parse().context("Invalid broker email address")?)
         .subject(subject)
         .header(ContentType::TEXT_PLAIN)
         .body(body)
@@ -272,7 +283,8 @@ fn build_opt_out_email_body(
 /// Strips CRLF (prevents header injection) and caps length at 998 chars
 /// per RFC 5322 line length limit.
 fn sanitize_email_header(input: &str) -> String {
-    input.chars()
+    input
+        .chars()
         .filter(|c| *c != '\r' && *c != '\n')
         .take(RFC5322_MAX_LINE_LEN)
         .collect()
@@ -315,7 +327,10 @@ mod tests {
     #[test]
     fn test_sanitize_email_header() {
         assert_eq!(sanitize_email_header("normal text"), "normal text");
-        assert_eq!(sanitize_email_header("inject\r\nBcc: evil@evil.com"), "injectBcc: evil@evil.com");
+        assert_eq!(
+            sanitize_email_header("inject\r\nBcc: evil@evil.com"),
+            "injectBcc: evil@evil.com"
+        );
         assert_eq!(sanitize_email_header("line\nbreak"), "linebreak");
         assert_eq!(sanitize_email_header(""), "");
     }
@@ -323,8 +338,14 @@ mod tests {
     #[test]
     fn test_build_opt_out_email_body_minimal() {
         let body = build_opt_out_email_body(
-            "John", "Doe", "john@example.com",
-            None, None, None, None, None,
+            "John",
+            "Doe",
+            "john@example.com",
+            None,
+            None,
+            None,
+            None,
+            None,
             "Spokeo",
         );
         assert!(body.contains("John Doe"));
@@ -338,7 +359,9 @@ mod tests {
     #[test]
     fn test_build_opt_out_email_body_full() {
         let body = build_opt_out_email_body(
-            "John", "Doe", "john@example.com",
+            "John",
+            "Doe",
+            "john@example.com",
             Some("555-1234"),
             Some("123 Main St"),
             Some("Springfield"),

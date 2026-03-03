@@ -52,7 +52,10 @@ pub async fn history_page(
         tasks.truncate(PAGE_SIZE);
     }
     let (next_cursor_ts, next_cursor_id) = if has_more {
-        tasks.last().map(|t| (Some(t.completed_at.clone().unwrap_or_default()), Some(t.id))).unwrap_or_default()
+        tasks
+            .last()
+            .map(|t| (Some(t.completed_at.clone().unwrap_or_default()), Some(t.id)))
+            .unwrap_or_default()
     } else {
         (None, None)
     };
@@ -66,7 +69,8 @@ pub async fn history_page(
         has_more,
     };
 
-    let html = template.render()
+    let html = template
+        .render()
         .map_err(|e| DashboardError::Internal(format!("Template error: {}", e)))?;
 
     Ok(Html(html).into_response())
@@ -84,29 +88,34 @@ async fn fetch_task_history(
         let rows = db::get_task_history(&conn, cursor_ts.as_deref(), cursor_id, 51)
             .map_err(|e| DashboardError::Internal(format!("Query error: {}", e)))?;
 
-        Ok(rows.into_iter().map(|row| {
-            let status_class = match row.status.as_str() {
-                "success" | "completed" => "success",
-                "failed" | "failure" => "danger",
-                "pending" => "warning",
-                "running" => "info",
-                "captcha_blocked" => "warning",
-                _ => "secondary",
-            }.to_string();
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let status_class = match row.status.as_str() {
+                    "success" | "completed" => "success",
+                    "failed" | "failure" => "danger",
+                    "pending" => "warning",
+                    "running" => "info",
+                    "captcha_blocked" => "warning",
+                    _ => "secondary",
+                }
+                .to_string();
 
-            TaskHistoryDisplay {
-                id: row.id,
-                broker_name: row.broker_name,
-                channel: row.channel,
-                status: row.status,
-                status_class,
-                created_at: row.created_at,
-                completed_at: row.completed_at,
-                duration_ms: row.duration_ms,
-                has_proof: row.proof_path.is_some(),
-                error_message: row.error_message,
-            }
-        }).collect())
-    }).await
-        .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))?
+                TaskHistoryDisplay {
+                    id: row.id,
+                    broker_name: row.broker_name,
+                    channel: row.channel,
+                    status: row.status,
+                    status_class,
+                    created_at: row.created_at,
+                    completed_at: row.completed_at,
+                    duration_ms: row.duration_ms,
+                    has_proof: row.proof_path.is_some(),
+                    error_message: row.error_message,
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))?
 }

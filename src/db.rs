@@ -37,9 +37,7 @@ pub fn open_db_with_params(
 
     // Verify the key works by attempting a read
     conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
-        .map_err(|_| anyhow::anyhow!(
-            "Incorrect passphrase. Your data is safe — try again."
-        ))?;
+        .map_err(|_| anyhow::anyhow!("Incorrect passphrase. Your data is safe — try again."))?;
 
     // Enable WAL mode for read concurrency
     conn.pragma_update(None, "journal_mode", "WAL")
@@ -208,11 +206,9 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 
     // Set schema version
     let current_version: Option<i32> = conn
-        .query_row(
-            "SELECT version FROM schema_version LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .ok();
 
     if current_version.is_none() {
@@ -257,13 +253,16 @@ pub fn get_profile_field(conn: &Connection, key: &str) -> Result<Option<Vec<u8>>
 /// Returns a HashMap of key → value (raw bytes decoded as UTF-8).
 /// Used by the dispatcher to cache profile data per-tick (CONS-R3-003).
 pub fn get_all_profile_fields(conn: &Connection) -> Result<HashMap<String, String>> {
-    let mut stmt = conn.prepare("SELECT key, value FROM user_profile")
+    let mut stmt = conn
+        .prepare("SELECT key, value FROM user_profile")
         .context("Failed to prepare get_all_profile_fields query")?;
-    let rows = stmt.query_map([], |row| {
-        let key: String = row.get(0)?;
-        let value: Vec<u8> = row.get(1)?;
-        Ok((key, value))
-    }).context("Failed to query profile fields")?;
+    let rows = stmt
+        .query_map([], |row| {
+            let key: String = row.get(0)?;
+            let value: Vec<u8> = row.get(1)?;
+            Ok((key, value))
+        })
+        .context("Failed to query profile fields")?;
 
     let mut fields = HashMap::new();
     for row in rows {
@@ -291,11 +290,9 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
 /// Retrieves a config value.
 pub fn get_config(conn: &Connection, key: &str) -> Result<Option<String>> {
-    let result = conn.query_row(
-        "SELECT value FROM config WHERE key = ?1",
-        [key],
-        |row| row.get::<_, String>(0),
-    );
+    let result = conn.query_row("SELECT value FROM config WHERE key = ?1", [key], |row| {
+        row.get::<_, String>(0)
+    });
     match result {
         Ok(value) => Ok(Some(value)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -375,8 +372,9 @@ pub struct DueTask {
 /// - next_recheck_at IS NULL (first run) OR next_recheck_at <= now
 /// - the associated broker is enabled
 pub fn get_due_tasks(conn: &Connection) -> Result<Vec<DueTask>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.broker_id, t.channel, t.retry_count,
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.id, t.broker_id, t.channel, t.retry_count,
                 b.playbook_path, b.recheck_days
          FROM opt_out_tasks t
          JOIN brokers b ON t.broker_id = b.id
@@ -384,23 +382,27 @@ pub fn get_due_tasks(conn: &Connection) -> Result<Vec<DueTask>> {
            AND b.enabled = 1
            AND (t.next_recheck_at IS NULL OR t.next_recheck_at <= datetime('now'))
          ORDER BY t.next_recheck_at ASC NULLS FIRST",
-    ).context("Failed to prepare get_due_tasks query")?;
+        )
+        .context("Failed to prepare get_due_tasks query")?;
 
-    let rows = stmt.query_map([], |row| {
-        Ok(DueTask {
-            id: row.get(0)?,
-            broker_id: row.get(1)?,
-            channel: row.get(2)?,
-            retry_count: row.get(3)?,
-            playbook_path: row.get(4)?,
-            // allowed_domains populated separately below
-            allowed_domains: Vec::new(),
-            max_retries: 3, // default, overridden below
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DueTask {
+                id: row.get(0)?,
+                broker_id: row.get(1)?,
+                channel: row.get(2)?,
+                retry_count: row.get(3)?,
+                playbook_path: row.get(4)?,
+                // allowed_domains populated separately below
+                allowed_domains: Vec::new(),
+                max_retries: 3, // default, overridden below
+            })
         })
-    }).context("Failed to query due tasks")?;
+        .context("Failed to query due tasks")?;
 
     // CONS-R2-018: Surface row deserialization errors instead of silently dropping
-    let tasks: Vec<DueTask> = rows.collect::<std::result::Result<Vec<_>, _>>()
+    let tasks: Vec<DueTask> = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
         .context("Failed to deserialize due task rows")?;
 
     // Populate allowed_domains from playbook YAML (stored in broker metadata)
@@ -415,8 +417,9 @@ pub fn get_due_tasks(conn: &Connection) -> Result<Vec<DueTask>> {
 /// An "active" task is one with status in ('pending', 'running').
 /// Returns the number of tasks created.
 pub fn create_missing_tasks(conn: &Connection) -> Result<usize> {
-    let count = conn.execute(
-        "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+    let count = conn
+        .execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
          SELECT b.id, 'pending', b.opt_out_channel, datetime('now')
          FROM brokers b
          WHERE b.enabled = 1
@@ -425,8 +428,9 @@ pub fn create_missing_tasks(conn: &Connection) -> Result<usize> {
                WHERE t.broker_id = b.id
                  AND t.status IN ('pending', 'running')
            )",
-        [],
-    ).context("Failed to create missing tasks")?;
+            [],
+        )
+        .context("Failed to create missing tasks")?;
 
     Ok(count)
 }
@@ -436,10 +440,12 @@ pub fn create_missing_tasks(conn: &Connection) -> Result<usize> {
 /// Returns Ok(true) if the task was claimed, Ok(false) if another
 /// process/tick already claimed it (0 rows affected).
 pub fn mark_task_running(conn: &Connection, task_id: i64) -> Result<bool> {
-    let rows = conn.execute(
-        "UPDATE opt_out_tasks SET status = 'running' WHERE id = ?1 AND status = 'pending'",
-        [task_id],
-    ).context("Failed to mark task as running")?;
+    let rows = conn
+        .execute(
+            "UPDATE opt_out_tasks SET status = 'running' WHERE id = ?1 AND status = 'pending'",
+            [task_id],
+        )
+        .context("Failed to mark task as running")?;
     Ok(rows > 0)
 }
 
@@ -473,8 +479,9 @@ pub fn update_task_for_retry(
         // Use the current retry_count for backoff calculation via CASE expression.
         // NOTE: CASE values MUST match RETRY_BACKOFFS constant above (CONS-R3-015).
         // retry_count 0→3600s(1h), 1→14400s(4h), 2→86400s(24h), ≥3→259200s(72h)
-        let rows = conn.execute(
-            "UPDATE opt_out_tasks SET
+        let rows = conn
+            .execute(
+                "UPDATE opt_out_tasks SET
                 status = 'pending',
                 retry_count = retry_count + 1,
                 error_code = ?1,
@@ -489,8 +496,9 @@ pub fn update_task_for_retry(
                         ELSE 3600
                     END || ' seconds')
              WHERE id = ?4 AND retry_count < ?5",
-            rusqlite::params![error_code, error_message, duration_ms, task_id, max_retries],
-        ).context("Failed to schedule task retry")?;
+                rusqlite::params![error_code, error_message, duration_ms, task_id, max_retries],
+            )
+            .context("Failed to schedule task retry")?;
 
         if rows > 0 {
             return Ok(true);
@@ -515,7 +523,8 @@ pub fn update_task_for_retry(
                 duration_ms,
                 task_id,
             ],
-        ).context("Failed to mark task as permanently failed")?;
+        )
+        .context("Failed to mark task as permanently failed")?;
         Ok(false)
     }
 }
@@ -541,8 +550,15 @@ pub fn complete_task_success(
             error_message = NULL,
             error_retryable = NULL
          WHERE id = ?5",
-        rusqlite::params![duration_ms, proof_path, confirmation_text, recheck_days, task_id],
-    ).context("Failed to complete task")?;
+        rusqlite::params![
+            duration_ms,
+            proof_path,
+            confirmation_text,
+            recheck_days,
+            task_id
+        ],
+    )
+    .context("Failed to complete task")?;
     Ok(())
 }
 
@@ -554,7 +570,8 @@ pub fn insert_run_log(conn: &Connection) -> Result<i64> {
         "INSERT INTO run_log (started_at, total_tasks, succeeded, failed, captcha_blocked)
          VALUES (datetime('now'), 0, 0, 0, 0)",
         [],
-    ).context("Failed to insert run log")?;
+    )
+    .context("Failed to insert run log")?;
     Ok(conn.last_insert_rowid())
 }
 
@@ -576,7 +593,8 @@ pub fn update_run_log(
             captcha_blocked = ?4
          WHERE id = ?5",
         rusqlite::params![total, succeeded, failed, captcha_blocked, run_id],
-    ).context("Failed to update run log")?;
+    )
+    .context("Failed to update run log")?;
     Ok(())
 }
 
@@ -584,14 +602,16 @@ pub fn update_run_log(
 
 /// Returns the number of email opt-out tasks completed today.
 pub fn get_daily_email_count(conn: &Connection) -> Result<i32> {
-    let count: i32 = conn.query_row(
-        "SELECT COUNT(*) FROM opt_out_tasks
+    let count: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM opt_out_tasks
          WHERE channel = 'email'
            AND status = 'success'
            AND completed_at >= date('now')",
-        [],
-        |row| row.get(0),
-    ).context("Failed to count daily emails")?;
+            [],
+            |row| row.get(0),
+        )
+        .context("Failed to count daily emails")?;
     Ok(count)
 }
 
@@ -626,8 +646,8 @@ pub fn replay_journal(conn: &Connection, journal_path: &Path) -> Result<usize> {
         // CONS-R4-005: Use write-to-temp + rename for atomicity.
         let old_content = std::fs::read_to_string(&replaying_path)
             .context("Failed to read orphaned .replaying file")?;
-        let new_content = std::fs::read_to_string(journal_path)
-            .context("Failed to read current journal")?;
+        let new_content =
+            std::fs::read_to_string(journal_path).context("Failed to read current journal")?;
         let merged = if old_content.trim().is_empty() {
             new_content.trim().to_string()
         } else {
@@ -639,7 +659,10 @@ pub fn replay_journal(conn: &Connection, journal_path: &Path) -> Result<usize> {
         std::fs::rename(&merging_path, journal_path)
             .context("Failed to rename merged journal into place")?;
         if let Err(e) = std::fs::remove_file(&replaying_path) {
-            tracing::warn!("Failed to remove .replaying after merge: {}. Will be cleaned on next startup.", e);
+            tracing::warn!(
+                "Failed to remove .replaying after merge: {}. Will be cleaned on next startup.",
+                e
+            );
         }
         tracing::warn!("Merged orphaned .replaying into journal for unified replay");
     }
@@ -657,8 +680,7 @@ pub fn replay_journal(conn: &Connection, journal_path: &Path) -> Result<usize> {
         );
     }
 
-    let content = std::fs::read_to_string(journal_path)
-        .context("Failed to read journal file")?;
+    let content = std::fs::read_to_string(journal_path).context("Failed to read journal file")?;
 
     if content.trim().is_empty() {
         let _ = std::fs::remove_file(journal_path);
@@ -691,7 +713,11 @@ pub fn replay_journal(conn: &Connection, journal_path: &Path) -> Result<usize> {
                         ) {
                             // Validate status against allowlist (CONS-008)
                             if !VALID_TASK_STATUSES.contains(&status) {
-                                tracing::error!(task_id, status, "Journal entry has invalid status value, skipping");
+                                tracing::error!(
+                                    task_id,
+                                    status,
+                                    "Journal entry has invalid status value, skipping"
+                                );
                                 failed += 1;
                                 continue;
                             }
@@ -723,7 +749,11 @@ pub fn replay_journal(conn: &Connection, journal_path: &Path) -> Result<usize> {
                             ) {
                                 Ok(_) => replayed += 1,
                                 Err(e) => {
-                                    tracing::error!(broker_id, "Journal replay failed for insert_task: {}", e);
+                                    tracing::error!(
+                                        broker_id,
+                                        "Journal replay failed for insert_task: {}",
+                                        e
+                                    );
                                     failed += 1;
                                 }
                             }
@@ -747,7 +777,10 @@ pub fn replay_journal(conn: &Connection, journal_path: &Path) -> Result<usize> {
     // CONS-R2-013: Downgrade to warning — entries are already committed,
     // so failing to delete is not data loss (at most a harmless re-replay).
     if let Err(e) = std::fs::remove_file(&replaying_path) {
-        tracing::warn!("Failed to remove replayed journal file (entries already committed): {}", e);
+        tracing::warn!(
+            "Failed to remove replayed journal file (entries already committed): {}",
+            e
+        );
     }
 
     if failed > 0 {
@@ -789,7 +822,7 @@ pub fn get_broker_statuses(conn: &Connection) -> Result<Vec<BrokerStatusRow>> {
             lt.status, lt.created_at, lt.next_recheck_at
         FROM brokers b
         LEFT JOIN latest_tasks lt ON b.id = lt.broker_id AND lt.rn = 1
-        ORDER BY b.name"
+        ORDER BY b.name",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -833,7 +866,8 @@ pub fn get_task_history(
     cursor_id: Option<i64>,
     limit: i64,
 ) -> Result<Vec<TaskHistoryRow>> {
-    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (cursor_ts, cursor_id) {
+    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (cursor_ts, cursor_id)
+    {
         (Some(ts), Some(id)) => (
             "SELECT t.id, b.name, t.channel, t.status, t.created_at, t.completed_at,
                     t.duration_ms, t.proof_path, t.error_message
@@ -841,7 +875,8 @@ pub fn get_task_history(
              JOIN brokers b ON t.broker_id = b.id
              WHERE (t.completed_at < ?1 OR (t.completed_at = ?1 AND t.id < ?2))
              ORDER BY t.completed_at DESC NULLS LAST, t.id DESC
-             LIMIT ?3".to_string(),
+             LIMIT ?3"
+                .to_string(),
             vec![
                 Box::new(ts.to_string()) as Box<dyn rusqlite::types::ToSql>,
                 Box::new(id),
@@ -854,7 +889,8 @@ pub fn get_task_history(
              FROM opt_out_tasks t
              JOIN brokers b ON t.broker_id = b.id
              ORDER BY t.completed_at DESC NULLS LAST, t.id DESC
-             LIMIT ?1".to_string(),
+             LIMIT ?1"
+                .to_string(),
             vec![Box::new(limit) as Box<dyn rusqlite::types::ToSql>],
         ),
     };
@@ -897,7 +933,7 @@ pub fn get_captcha_queue(conn: &Connection) -> Result<Vec<CaptchaQueueRow>> {
          JOIN brokers b ON t.broker_id = b.id
          WHERE t.status = 'captcha_blocked'
          ORDER BY t.created_at ASC
-         LIMIT 200"
+         LIMIT 200",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -937,11 +973,14 @@ pub enum CaptchaMutationResult {
 /// TOCTOU races under concurrent requests.
 pub fn resolve_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMutationResult> {
     // First check if task exists at all (for NotFound vs WrongStatus distinction)
-    let task_status: Option<String> = conn.query_row(
-        "SELECT status FROM opt_out_tasks WHERE id = ?1",
-        [task_id],
-        |row| row.get(0),
-    ).optional().context("Failed to query task")?;
+    let task_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM opt_out_tasks WHERE id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("Failed to query task")?;
 
     match task_status.as_deref() {
         None => return Ok(CaptchaMutationResult::NotFound),
@@ -951,12 +990,14 @@ pub fn resolve_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMu
 
     // Atomic UPDATE: status guard + expiry guard in WHERE clause.
     // If another request resolved/abandoned first, rows_affected == 0.
-    let rows = conn.execute(
-        "UPDATE opt_out_tasks SET status = 'pending', retry_count = 0
+    let rows = conn
+        .execute(
+            "UPDATE opt_out_tasks SET status = 'pending', retry_count = 0
          WHERE id = ?1 AND status = 'captcha_blocked'
            AND created_at > datetime('now', '-24 hours')",
-        [task_id],
-    ).context("Failed to resolve captcha task")?;
+            [task_id],
+        )
+        .context("Failed to resolve captcha task")?;
 
     if rows == 0 {
         // Task was captcha_blocked but expired (created_at > 24h ago), or another
@@ -973,11 +1014,14 @@ pub fn resolve_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMu
 /// Uses atomic UPDATEs with retry_count guards in WHERE to prevent TOCTOU races.
 pub fn abandon_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMutationResult> {
     // Check task exists and is in correct status
-    let task_status: Option<String> = conn.query_row(
-        "SELECT status FROM opt_out_tasks WHERE id = ?1",
-        [task_id],
-        |row| row.get(0),
-    ).optional().context("Failed to query task")?;
+    let task_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM opt_out_tasks WHERE id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("Failed to query task")?;
 
     match task_status.as_deref() {
         None => return Ok(CaptchaMutationResult::NotFound),
@@ -987,12 +1031,14 @@ pub fn abandon_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMu
 
     // Try the permanent-failure path first (retry_count >= 4 means 5th+ abandon).
     // Atomic: only matches if status AND retry_count threshold both hold.
-    let perm_fail_rows = conn.execute(
-        "UPDATE opt_out_tasks SET status = 'failure', error_code = 'max_retries_exceeded',
+    let perm_fail_rows = conn
+        .execute(
+            "UPDATE opt_out_tasks SET status = 'failure', error_code = 'max_retries_exceeded',
          error_message = 'CAPTCHA abandoned too many times', completed_at = datetime('now')
          WHERE id = ?1 AND status = 'captcha_blocked' AND retry_count >= 4",
-        [task_id],
-    ).context("Failed to permanently fail captcha task")?;
+            [task_id],
+        )
+        .context("Failed to permanently fail captcha task")?;
 
     if perm_fail_rows > 0 {
         return Ok(CaptchaMutationResult::MaxRetriesExceeded);
@@ -1000,11 +1046,13 @@ pub fn abandon_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMu
 
     // Normal abandon: increment retry_count and return to pending.
     // Atomic: only matches if still captcha_blocked AND retry_count < 4.
-    let rows = conn.execute(
-        "UPDATE opt_out_tasks SET status = 'pending', retry_count = retry_count + 1
+    let rows = conn
+        .execute(
+            "UPDATE opt_out_tasks SET status = 'pending', retry_count = retry_count + 1
          WHERE id = ?1 AND status = 'captcha_blocked' AND retry_count < 4",
-        [task_id],
-    ).context("Failed to abandon captcha task")?;
+            [task_id],
+        )
+        .context("Failed to abandon captcha task")?;
 
     if rows == 0 {
         // Another request changed the status or retry_count between our SELECT and UPDATE
@@ -1017,8 +1065,7 @@ pub fn abandon_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMu
 /// Checks if a task is expired (created_at + 24h < now).
 fn check_task_expired(created_at: &str) -> bool {
     let created = chrono::NaiveDateTime::parse_from_str(created_at, "%Y-%m-%d %H:%M:%S")
-        .or_else(|_| chrono::DateTime::parse_from_rfc3339(created_at)
-            .map(|dt| dt.naive_utc()));
+        .or_else(|_| chrono::DateTime::parse_from_rfc3339(created_at).map(|dt| dt.naive_utc()));
     match created {
         Ok(dt) => {
             let now = chrono::Utc::now().naive_utc();
@@ -1034,7 +1081,9 @@ pub fn get_task_proof_path(conn: &Connection, task_id: i64) -> Result<Option<Str
         "SELECT proof_path FROM opt_out_tasks WHERE id = ?1",
         [task_id],
         |row| row.get(0),
-    ).optional().context("Failed to query task proof path")
+    )
+    .optional()
+    .context("Failed to query task proof path")
 }
 
 /// Result of a broker re-run trigger.
@@ -1056,8 +1105,9 @@ pub enum RerunResult {
 pub fn trigger_broker_rerun(conn: &Connection, broker_id: &str) -> Result<RerunResult> {
     // Atomic insert: checks broker exists, is enabled, and no pending/running task exists
     // all within a single SQL statement.
-    let rows = conn.execute(
-        "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
+    let rows = conn
+        .execute(
+            "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at)
          SELECT b.id, 'pending', b.opt_out_channel, datetime('now')
          FROM brokers b
          WHERE b.id = ?1 AND b.enabled = 1
@@ -1065,25 +1115,31 @@ pub fn trigger_broker_rerun(conn: &Connection, broker_id: &str) -> Result<RerunR
              SELECT 1 FROM opt_out_tasks
              WHERE broker_id = ?1 AND status IN ('pending', 'running')
          )",
-        rusqlite::params![broker_id],
-    ).context("Failed to trigger broker rerun")?;
+            rusqlite::params![broker_id],
+        )
+        .context("Failed to trigger broker rerun")?;
 
     if rows > 0 {
         // Task was created — fetch broker name for response
-        let broker_name: String = conn.query_row(
-            "SELECT name FROM brokers WHERE id = ?1",
-            [broker_id],
-            |row| row.get(0),
-        ).context("Failed to get broker name")?;
+        let broker_name: String = conn
+            .query_row(
+                "SELECT name FROM brokers WHERE id = ?1",
+                [broker_id],
+                |row| row.get(0),
+            )
+            .context("Failed to get broker name")?;
         Ok(RerunResult::Created(broker_name))
     } else {
         // Zero rows: broker not found, disabled, or already queued.
         // Disambiguate for accurate error responses.
-        let broker_info: Option<(String, bool)> = conn.query_row(
-            "SELECT name, enabled FROM brokers WHERE id = ?1",
-            [broker_id],
-            |row| Ok((row.get(0)?, row.get::<_, i32>(1)? != 0)),
-        ).optional().context("Failed to query broker")?;
+        let broker_info: Option<(String, bool)> = conn
+            .query_row(
+                "SELECT name, enabled FROM brokers WHERE id = ?1",
+                [broker_id],
+                |row| Ok((row.get(0)?, row.get::<_, i32>(1)? != 0)),
+            )
+            .optional()
+            .context("Failed to query broker")?;
 
         match broker_info {
             None => Ok(RerunResult::BrokerNotFound),
@@ -1145,40 +1201,50 @@ pub fn get_health_stats(conn: &Connection) -> Result<HealthStats> {
          LEFT JOIN opt_out_tasks t ON b.id = t.broker_id
          GROUP BY b.id, b.name
          HAVING total_attempts > 0
-         ORDER BY b.name"
+         ORDER BY b.name",
     )?;
-    let broker_health: Vec<BrokerHealthRow> = stmt.query_map([], |row| {
-        let total: i64 = row.get(1)?;
-        let successful: i64 = row.get(2)?;
-        let rate = if total > 0 { (successful as f64 / total as f64) * 100.0 } else { 0.0 };
-        Ok(BrokerHealthRow {
-            name: row.get(0)?,
-            success_rate: rate,
-            total_attempts: total,
-            successful,
-        })
-    })?.collect::<rusqlite::Result<Vec<_>>>()
+    let broker_health: Vec<BrokerHealthRow> = stmt
+        .query_map([], |row| {
+            let total: i64 = row.get(1)?;
+            let successful: i64 = row.get(2)?;
+            let rate = if total > 0 {
+                (successful as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            Ok(BrokerHealthRow {
+                name: row.get(0)?,
+                success_rate: rate,
+                total_attempts: total,
+                successful,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
         .context("Failed to query broker health")?;
 
     // Last run
-    let last_run: Option<LastRunRow> = conn.query_row(
-        "SELECT started_at, total_tasks, succeeded, failed, captcha_blocked
+    let last_run: Option<LastRunRow> = conn
+        .query_row(
+            "SELECT started_at, total_tasks, succeeded, failed, captcha_blocked
          FROM run_log
          ORDER BY id DESC LIMIT 1",
-        [],
-        |row| Ok(LastRunRow {
-            started_at: row.get(0)?,
-            total: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-            succeeded: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-            captcha_blocked: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
-        }),
-    ).optional().context("Failed to query last run")?;
+            [],
+            |row| {
+                Ok(LastRunRow {
+                    started_at: row.get(0)?,
+                    total: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    succeeded: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                    captcha_blocked: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                })
+            },
+        )
+        .optional()
+        .context("Failed to query last run")?;
 
     let has_run_data = last_run.is_some() || !broker_health.is_empty();
 
-    let emails_today = get_daily_email_count(conn)
-        .context("Failed to query daily email count")?;
+    let emails_today = get_daily_email_count(conn).context("Failed to query daily email count")?;
 
     Ok(HealthStats {
         total_brokers,
@@ -1222,10 +1288,7 @@ pub enum DbWriteMessage {
         delay_recheck_days: Option<i32>,
     },
     /// Insert a new opt-out task.
-    InsertTask {
-        broker_id: String,
-        channel: String,
-    },
+    InsertTask { broker_id: String, channel: String },
     /// Record a successful task completion with recheck scheduling.
     CompleteTaskSuccess {
         task_id: i64,
@@ -1262,7 +1325,10 @@ pub enum DbWriteMessage {
 pub fn spawn_writer(
     conn: Connection,
     journal_path: std::path::PathBuf,
-) -> (mpsc::Sender<DbWriteMessage>, tokio::task::JoinHandle<Result<()>>) {
+) -> (
+    mpsc::Sender<DbWriteMessage>,
+    tokio::task::JoinHandle<Result<()>>,
+) {
     let (tx, mut rx) = mpsc::channel::<DbWriteMessage>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
@@ -1328,13 +1394,21 @@ pub fn spawn_writer(
                                 ],
                             );
                             if let Err(e) = result {
-                                tracing::error!("DB write failed for task {}: {}. Writing to journal.", task_id, e);
+                                tracing::error!(
+                                    "DB write failed for task {}: {}. Writing to journal.",
+                                    task_id,
+                                    e
+                                );
                                 let entry = serde_json::json!({
                                     "type": "update_task",
                                     "task_id": task_id,
                                     "status": status,
                                 });
-                                write_to_journal(&journal_path, &entry.to_string(), &mut journal_file);
+                                write_to_journal(
+                                    &journal_path,
+                                    &entry.to_string(),
+                                    &mut journal_file,
+                                );
                             }
                         }
                         DbWriteMessage::InsertTask { broker_id, channel } => {
@@ -1344,13 +1418,21 @@ pub fn spawn_writer(
                                 rusqlite::params![broker_id, channel],
                             );
                             if let Err(e) = result {
-                                tracing::error!("DB insert failed for broker {}: {}. Writing to journal.", broker_id, e);
+                                tracing::error!(
+                                    "DB insert failed for broker {}: {}. Writing to journal.",
+                                    broker_id,
+                                    e
+                                );
                                 let entry = serde_json::json!({
                                     "type": "insert_task",
                                     "broker_id": broker_id,
                                     "channel": channel,
                                 });
-                                write_to_journal(&journal_path, &entry.to_string(), &mut journal_file);
+                                write_to_journal(
+                                    &journal_path,
+                                    &entry.to_string(),
+                                    &mut journal_file,
+                                );
                             }
                         }
                         // CONS-016: Call existing function instead of duplicating SQL
@@ -1369,13 +1451,21 @@ pub fn spawn_writer(
                                 confirmation_text.as_deref(),
                                 recheck_days,
                             ) {
-                                tracing::error!("DB success update failed for task {}: {}. Writing to journal.", task_id, e);
+                                tracing::error!(
+                                    "DB success update failed for task {}: {}. Writing to journal.",
+                                    task_id,
+                                    e
+                                );
                                 let entry = serde_json::json!({
                                     "type": "update_task",
                                     "task_id": task_id,
                                     "status": "success",
                                 });
-                                write_to_journal(&journal_path, &entry.to_string(), &mut journal_file);
+                                write_to_journal(
+                                    &journal_path,
+                                    &entry.to_string(),
+                                    &mut journal_file,
+                                );
                             }
                         }
                         // CONS-003, CONS-016: Call existing function; journal on failure
@@ -1407,7 +1497,11 @@ pub fn spawn_writer(
                                         "task_id": task_id,
                                         "status": "failure",
                                     });
-                                    write_to_journal(&journal_path, &entry.to_string(), &mut journal_file);
+                                    write_to_journal(
+                                        &journal_path,
+                                        &entry.to_string(),
+                                        &mut journal_file,
+                                    );
                                 }
                             }
                         }
@@ -1419,7 +1513,14 @@ pub fn spawn_writer(
                             failed,
                             captcha_blocked,
                         } => {
-                            if let Err(e) = update_run_log(&conn, run_id, total, succeeded, failed, captcha_blocked) {
+                            if let Err(e) = update_run_log(
+                                &conn,
+                                run_id,
+                                total,
+                                succeeded,
+                                failed,
+                                captcha_blocked,
+                            ) {
                                 tracing::error!(run_id, "Failed to update run log: {}", e);
                             }
                         }
@@ -1457,7 +1558,10 @@ fn write_to_journal(journal_path: &Path, line: &str, journal_file: &mut Option<s
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    if let Err(e) = std::fs::set_permissions(journal_path, std::fs::Permissions::from_mode(0o600)) {
+                    if let Err(e) = std::fs::set_permissions(
+                        journal_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    ) {
                         tracing::error!("Failed to set journal file permissions: {}", e);
                     }
                 }
@@ -1487,7 +1591,8 @@ mod tests {
     fn create_test_db() -> (Connection, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _salt) = create_db_with_params(&db_path, "test-passphrase", &TEST_PARAMS).unwrap();
+        let (conn, _salt) =
+            create_db_with_params(&db_path, "test-passphrase", &TEST_PARAMS).unwrap();
         (conn, dir)
     }
 
@@ -1593,7 +1698,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test_writer.db");
         let journal_path = dir.path().join("test_writer.journal");
-        let (conn, _salt) = create_db_with_params(&db_path, "test-passphrase", &TEST_PARAMS).unwrap();
+        let (conn, _salt) =
+            create_db_with_params(&db_path, "test-passphrase", &TEST_PARAMS).unwrap();
 
         // Insert a broker and a task so UpdateTask has something to update.
         let broker = BrokerRow {
@@ -1646,8 +1752,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
-        let (_conn, salt) =
-            create_db_with_params(&db_path, "my-passphrase", &TEST_PARAMS).unwrap();
+        let (_conn, salt) = create_db_with_params(&db_path, "my-passphrase", &TEST_PARAMS).unwrap();
         drop(_conn);
 
         // Derive key once
@@ -1749,10 +1854,10 @@ mod tests {
 
     #[test]
     fn test_retry_backoff_schedule() {
-        assert_eq!(retry_backoff_secs(0), 3600);    // 1h
-        assert_eq!(retry_backoff_secs(1), 14400);   // 4h
-        assert_eq!(retry_backoff_secs(2), 86400);   // 24h
-        assert_eq!(retry_backoff_secs(3), 259200);  // 72h
+        assert_eq!(retry_backoff_secs(0), 3600); // 1h
+        assert_eq!(retry_backoff_secs(1), 14400); // 4h
+        assert_eq!(retry_backoff_secs(2), 86400); // 24h
+        assert_eq!(retry_backoff_secs(3), 259200); // 72h
         assert_eq!(retry_backoff_secs(99), 259200); // clamped to last
     }
 
@@ -1769,7 +1874,13 @@ mod tests {
         let task_id = conn.last_insert_rowid();
 
         let retried = update_task_for_retry(
-            &conn, task_id, "selector_not_found", "Button missing", true, 5000, 3,
+            &conn,
+            task_id,
+            "selector_not_found",
+            "Button missing",
+            true,
+            5000,
+            3,
         )
         .unwrap();
         assert!(retried);
@@ -1806,7 +1917,13 @@ mod tests {
         let task_id = conn.last_insert_rowid();
 
         let retried = update_task_for_retry(
-            &conn, task_id, "playbook_error", "Step failed", true, 5000, 3,
+            &conn,
+            task_id,
+            "playbook_error",
+            "Step failed",
+            true,
+            5000,
+            3,
         )
         .unwrap();
         assert!(!retried);
@@ -1834,7 +1951,13 @@ mod tests {
         let task_id = conn.last_insert_rowid();
 
         let retried = update_task_for_retry(
-            &conn, task_id, "domain_violation", "Security violation", false, 3000, 3,
+            &conn,
+            task_id,
+            "domain_violation",
+            "Security violation",
+            false,
+            3000,
+            3,
         )
         .unwrap();
         assert!(!retried);
@@ -1861,8 +1984,15 @@ mod tests {
         .unwrap();
         let task_id = conn.last_insert_rowid();
 
-        complete_task_success(&conn, task_id, 5000, Some("/proofs/test.png"), Some("Confirmed"), 90)
-            .unwrap();
+        complete_task_success(
+            &conn,
+            task_id,
+            5000,
+            Some("/proofs/test.png"),
+            Some("Confirmed"),
+            90,
+        )
+        .unwrap();
 
         let status: String = conn
             .query_row(
@@ -1945,11 +2075,7 @@ mod tests {
 
         // Tasks should exist in DB
         let count: i32 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM opt_out_tasks",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM opt_out_tasks", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2);
     }

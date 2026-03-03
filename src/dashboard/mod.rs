@@ -84,30 +84,55 @@ pub enum DashboardError {
 impl IntoResponse for DashboardError {
     fn into_response(self) -> Response {
         match self {
-            DashboardError::BadRequest(msg) => {
-                (StatusCode::BAD_REQUEST, Html(format!("<p>{}</p>", askama::MarkupDisplay::new_unsafe(&msg, askama::Html)))).into_response()
-            }
-            DashboardError::Unauthorized => {
-                (StatusCode::UNAUTHORIZED, Html("<p>Unauthorized. <a href=\"/login\">Log in</a></p>".to_string())).into_response()
-            }
-            DashboardError::Forbidden(msg) => {
-                (StatusCode::FORBIDDEN, Html(format!("<p>{}</p>", askama::MarkupDisplay::new_unsafe(&msg, askama::Html)))).into_response()
-            }
+            DashboardError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                Html(format!(
+                    "<p>{}</p>",
+                    askama::MarkupDisplay::new_unsafe(&msg, askama::Html)
+                )),
+            )
+                .into_response(),
+            DashboardError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                Html("<p>Unauthorized. <a href=\"/login\">Log in</a></p>".to_string()),
+            )
+                .into_response(),
+            DashboardError::Forbidden(msg) => (
+                StatusCode::FORBIDDEN,
+                Html(format!(
+                    "<p>{}</p>",
+                    askama::MarkupDisplay::new_unsafe(&msg, askama::Html)
+                )),
+            )
+                .into_response(),
             DashboardError::NotFound => {
                 (StatusCode::NOT_FOUND, Html("<p>Not found</p>".to_string())).into_response()
             }
-            DashboardError::Conflict(msg) => {
-                (StatusCode::CONFLICT, Html(format!("<p>{}</p>", askama::MarkupDisplay::new_unsafe(&msg, askama::Html)))).into_response()
-            }
-            DashboardError::PayloadTooLarge => {
-                (StatusCode::PAYLOAD_TOO_LARGE, Html("<p>File too large</p>".to_string())).into_response()
-            }
-            DashboardError::TooManyRequests => {
-                (StatusCode::TOO_MANY_REQUESTS, Html("<p>Too many login attempts. Try again in a minute.</p>".to_string())).into_response()
-            }
+            DashboardError::Conflict(msg) => (
+                StatusCode::CONFLICT,
+                Html(format!(
+                    "<p>{}</p>",
+                    askama::MarkupDisplay::new_unsafe(&msg, askama::Html)
+                )),
+            )
+                .into_response(),
+            DashboardError::PayloadTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Html("<p>File too large</p>".to_string()),
+            )
+                .into_response(),
+            DashboardError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Html("<p>Too many login attempts. Try again in a minute.</p>".to_string()),
+            )
+                .into_response(),
             DashboardError::Internal(msg) => {
                 tracing::error!("Dashboard internal error: {}", msg);
-                (StatusCode::INTERNAL_SERVER_ERROR, Html("<p>Internal server error</p>".to_string())).into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Html("<p>Internal server error</p>".to_string()),
+                )
+                    .into_response()
             }
         }
     }
@@ -119,19 +144,46 @@ pub fn build_router(state: DashboardState) -> Router {
     let public_routes = Router::new()
         .route("/login", axum::routing::get(handlers::login_page))
         .route("/login", axum::routing::post(handlers::login_submit))
-        .route("/static/htmx.min.js", axum::routing::get(handlers::serve_htmx));
+        .route(
+            "/static/htmx.min.js",
+            axum::routing::get(handlers::serve_htmx),
+        );
 
     // Authenticated routes
     let authed_routes = Router::new()
         .route("/", axum::routing::get(handlers::status::status_page))
-        .route("/status-table", axum::routing::get(handlers::status::status_table_partial))
-        .route("/history", axum::routing::get(handlers::history::history_page))
-        .route("/history/proof/{task_id}", axum::routing::get(handlers::proof::serve_proof))
-        .route("/captcha", axum::routing::get(handlers::captcha::captcha_page))
-        .route("/captcha/queue", axum::routing::get(handlers::captcha::captcha_queue_partial))
-        .route("/captcha/{id}/resolve", axum::routing::post(handlers::captcha::resolve_captcha))
-        .route("/captcha/{id}/abandon", axum::routing::post(handlers::captcha::abandon_captcha))
-        .route("/broker/{id}/rerun", axum::routing::post(handlers::trigger::trigger_rerun))
+        .route(
+            "/status-table",
+            axum::routing::get(handlers::status::status_table_partial),
+        )
+        .route(
+            "/history",
+            axum::routing::get(handlers::history::history_page),
+        )
+        .route(
+            "/history/proof/{task_id}",
+            axum::routing::get(handlers::proof::serve_proof),
+        )
+        .route(
+            "/captcha",
+            axum::routing::get(handlers::captcha::captcha_page),
+        )
+        .route(
+            "/captcha/queue",
+            axum::routing::get(handlers::captcha::captcha_queue_partial),
+        )
+        .route(
+            "/captcha/{id}/resolve",
+            axum::routing::post(handlers::captcha::resolve_captcha),
+        )
+        .route(
+            "/captcha/{id}/abandon",
+            axum::routing::post(handlers::captcha::abandon_captcha),
+        )
+        .route(
+            "/broker/{id}/rerun",
+            axum::routing::post(handlers::trigger::trigger_rerun),
+        )
         .route("/health", axum::routing::get(handlers::health::health_page))
         .route("/logout", axum::routing::get(handlers::logout))
         .route_layer(middleware::from_fn_with_state(
@@ -187,7 +239,8 @@ pub async fn start(
     let app = build_router(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], DASHBOARD_PORT));
-    let listener = tokio::net::TcpListener::bind(addr).await
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to bind dashboard to {}: {}", addr, e))?;
 
     tracing::info!(%addr, "Dashboard listening");
@@ -229,29 +282,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
-        let (conn, _salt) = db::create_db_with_params(
-            &db_path, "test-passphrase", &crate::crypto::TEST_PARAMS,
-        ).unwrap();
+        let (conn, _salt) =
+            db::create_db_with_params(&db_path, "test-passphrase", &crate::crypto::TEST_PARAMS)
+                .unwrap();
 
-        let hex_key = db::derive_db_key_with_params(
-            "test-passphrase", &_salt, &crate::crypto::TEST_PARAMS,
-        ).unwrap();
+        let hex_key =
+            db::derive_db_key_with_params("test-passphrase", &_salt, &crate::crypto::TEST_PARAMS)
+                .unwrap();
 
         // Create dashboard indexes
         db::create_dashboard_indexes(&conn).unwrap();
 
         // Insert test broker
-        db::upsert_broker(&conn, &db::BrokerRow {
-            id: "test-broker".into(),
-            name: "Test Broker".into(),
-            category: "people_search".into(),
-            opt_out_channel: "web_form".into(),
-            recheck_days: 90,
-            parent_company: None,
-            playbook_path: "playbooks/official/test.yaml".into(),
-            trust_tier: "official".into(),
-            enabled: true,
-        }).unwrap();
+        db::upsert_broker(
+            &conn,
+            &db::BrokerRow {
+                id: "test-broker".into(),
+                name: "Test Broker".into(),
+                category: "people_search".into(),
+                opt_out_channel: "web_form".into(),
+                recheck_days: 90,
+                parent_company: None,
+                playbook_path: "playbooks/official/test.yaml".into(),
+                trust_tier: "official".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
 
         drop(conn);
 
@@ -265,7 +322,8 @@ mod tests {
         let auth_token_str = "test-token-abc123";
         let token_hash = sha2::Sha256::digest(auth_token_str.as_bytes());
         let token_hash_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD, token_hash,
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            token_hash,
         );
 
         let state = DashboardState {
@@ -464,8 +522,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
-        assert_eq!(resp.headers().get("x-content-type-options").unwrap(), "nosniff");
-        assert_eq!(resp.headers().get("referrer-policy").unwrap(), "no-referrer");
+        assert_eq!(
+            resp.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        assert_eq!(
+            resp.headers().get("referrer-policy").unwrap(),
+            "no-referrer"
+        );
         assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
         assert!(resp.headers().get("content-security-policy").is_some());
         assert!(resp.headers().get("permissions-policy").is_some());
@@ -490,7 +554,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let html = String::from_utf8_lossy(&body);
         assert!(html.contains("Test Broker"));
         assert!(html.contains("Never Run"));
@@ -538,7 +604,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let html = String::from_utf8_lossy(&body);
         assert!(html.contains("No opt-out attempts yet"));
     }
@@ -562,7 +630,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let html = String::from_utf8_lossy(&body);
         assert!(html.contains("No CAPTCHAs pending"));
     }
@@ -586,7 +656,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let html = String::from_utf8_lossy(&body);
         assert!(html.contains("No run data yet"));
     }
@@ -683,7 +755,8 @@ mod tests {
     fn test_get_broker_statuses_empty() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
         db::create_dashboard_indexes(&conn).unwrap();
 
         let statuses = db::get_broker_statuses(&conn).unwrap();
@@ -694,20 +767,25 @@ mod tests {
     fn test_get_broker_statuses_with_data() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
         db::create_dashboard_indexes(&conn).unwrap();
 
-        db::upsert_broker(&conn, &db::BrokerRow {
-            id: "broker1".into(),
-            name: "Broker One".into(),
-            category: "people_search".into(),
-            opt_out_channel: "web_form".into(),
-            recheck_days: 90,
-            parent_company: None,
-            playbook_path: "playbooks/official/b1.yaml".into(),
-            trust_tier: "official".into(),
-            enabled: true,
-        }).unwrap();
+        db::upsert_broker(
+            &conn,
+            &db::BrokerRow {
+                id: "broker1".into(),
+                name: "Broker One".into(),
+                category: "people_search".into(),
+                opt_out_channel: "web_form".into(),
+                recheck_days: 90,
+                parent_company: None,
+                playbook_path: "playbooks/official/b1.yaml".into(),
+                trust_tier: "official".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
 
         // No tasks yet — should show as "never run"
         let statuses = db::get_broker_statuses(&conn).unwrap();
@@ -720,7 +798,8 @@ mod tests {
     fn test_get_task_history_empty() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
         db::create_dashboard_indexes(&conn).unwrap();
 
         let history = db::get_task_history(&conn, None, None, 50).unwrap();
@@ -731,7 +810,8 @@ mod tests {
     fn test_get_captcha_queue_empty() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
         db::create_dashboard_indexes(&conn).unwrap();
 
         let queue = db::get_captcha_queue(&conn).unwrap();
@@ -742,7 +822,8 @@ mod tests {
     fn test_get_health_stats_empty() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
         db::create_dashboard_indexes(&conn).unwrap();
 
         let stats = db::get_health_stats(&conn).unwrap();
@@ -754,19 +835,24 @@ mod tests {
     fn test_trigger_broker_rerun_creates_task() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
 
-        db::upsert_broker(&conn, &db::BrokerRow {
-            id: "broker1".into(),
-            name: "Broker One".into(),
-            category: "people_search".into(),
-            opt_out_channel: "web_form".into(),
-            recheck_days: 90,
-            parent_company: None,
-            playbook_path: "playbooks/official/b1.yaml".into(),
-            trust_tier: "official".into(),
-            enabled: true,
-        }).unwrap();
+        db::upsert_broker(
+            &conn,
+            &db::BrokerRow {
+                id: "broker1".into(),
+                name: "Broker One".into(),
+                category: "people_search".into(),
+                opt_out_channel: "web_form".into(),
+                recheck_days: 90,
+                parent_company: None,
+                playbook_path: "playbooks/official/b1.yaml".into(),
+                trust_tier: "official".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
 
         // First rerun should succeed
         match db::trigger_broker_rerun(&conn, "broker1").unwrap() {
@@ -776,8 +862,11 @@ mod tests {
 
         // Second rerun should return AlreadyQueued
         match db::trigger_broker_rerun(&conn, "broker1").unwrap() {
-            db::RerunResult::AlreadyQueued => {},
-            other => panic!("Expected AlreadyQueued, got {:?}", std::mem::discriminant(&other)),
+            db::RerunResult::AlreadyQueued => {}
+            other => panic!(
+                "Expected AlreadyQueued, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -785,23 +874,31 @@ mod tests {
     fn test_trigger_rerun_disabled_broker() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
 
-        db::upsert_broker(&conn, &db::BrokerRow {
-            id: "broker1".into(),
-            name: "Broker One".into(),
-            category: "people_search".into(),
-            opt_out_channel: "web_form".into(),
-            recheck_days: 90,
-            parent_company: None,
-            playbook_path: "playbooks/official/b1.yaml".into(),
-            trust_tier: "official".into(),
-            enabled: false,
-        }).unwrap();
+        db::upsert_broker(
+            &conn,
+            &db::BrokerRow {
+                id: "broker1".into(),
+                name: "Broker One".into(),
+                category: "people_search".into(),
+                opt_out_channel: "web_form".into(),
+                recheck_days: 90,
+                parent_company: None,
+                playbook_path: "playbooks/official/b1.yaml".into(),
+                trust_tier: "official".into(),
+                enabled: false,
+            },
+        )
+        .unwrap();
 
         match db::trigger_broker_rerun(&conn, "broker1").unwrap() {
-            db::RerunResult::BrokerDisabled => {},
-            other => panic!("Expected BrokerDisabled, got {:?}", std::mem::discriminant(&other)),
+            db::RerunResult::BrokerDisabled => {}
+            other => panic!(
+                "Expected BrokerDisabled, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -809,11 +906,15 @@ mod tests {
     fn test_trigger_rerun_nonexistent_broker() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
 
         match db::trigger_broker_rerun(&conn, "nonexistent").unwrap() {
-            db::RerunResult::BrokerNotFound => {},
-            other => panic!("Expected BrokerNotFound, got {:?}", std::mem::discriminant(&other)),
+            db::RerunResult::BrokerNotFound => {}
+            other => panic!(
+                "Expected BrokerNotFound, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -821,35 +922,45 @@ mod tests {
     fn test_resolve_captcha_task() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
 
-        db::upsert_broker(&conn, &db::BrokerRow {
-            id: "broker1".into(),
-            name: "Broker".into(),
-            category: "people_search".into(),
-            opt_out_channel: "web_form".into(),
-            recheck_days: 90,
-            parent_company: None,
-            playbook_path: "p.yaml".into(),
-            trust_tier: "official".into(),
-            enabled: true,
-        }).unwrap();
+        db::upsert_broker(
+            &conn,
+            &db::BrokerRow {
+                id: "broker1".into(),
+                name: "Broker".into(),
+                category: "people_search".into(),
+                opt_out_channel: "web_form".into(),
+                recheck_days: 90,
+                parent_company: None,
+                playbook_path: "p.yaml".into(),
+                trust_tier: "official".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at, retry_count)
              VALUES ('broker1', 'captcha_blocked', 'web_form', datetime('now'), 0)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let task_id = conn.last_insert_rowid();
 
         match db::resolve_captcha_task(&conn, task_id).unwrap() {
-            db::CaptchaMutationResult::Success => {},
+            db::CaptchaMutationResult::Success => {}
             _ => panic!("Expected Success"),
         }
 
-        let status: String = conn.query_row(
-            "SELECT status FROM opt_out_tasks WHERE id = ?1", [task_id], |r| r.get(0),
-        ).unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(status, "pending");
     }
 
@@ -857,35 +968,45 @@ mod tests {
     fn test_abandon_captcha_increments_retry() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
 
-        db::upsert_broker(&conn, &db::BrokerRow {
-            id: "broker1".into(),
-            name: "Broker".into(),
-            category: "people_search".into(),
-            opt_out_channel: "web_form".into(),
-            recheck_days: 90,
-            parent_company: None,
-            playbook_path: "p.yaml".into(),
-            trust_tier: "official".into(),
-            enabled: true,
-        }).unwrap();
+        db::upsert_broker(
+            &conn,
+            &db::BrokerRow {
+                id: "broker1".into(),
+                name: "Broker".into(),
+                category: "people_search".into(),
+                opt_out_channel: "web_form".into(),
+                recheck_days: 90,
+                parent_company: None,
+                playbook_path: "p.yaml".into(),
+                trust_tier: "official".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at, retry_count)
              VALUES ('broker1', 'captcha_blocked', 'web_form', datetime('now'), 0)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let task_id = conn.last_insert_rowid();
 
         match db::abandon_captcha_task(&conn, task_id).unwrap() {
-            db::CaptchaMutationResult::Success => {},
+            db::CaptchaMutationResult::Success => {}
             _ => panic!("Expected Success"),
         }
 
-        let retry_count: i32 = conn.query_row(
-            "SELECT retry_count FROM opt_out_tasks WHERE id = ?1", [task_id], |r| r.get(0),
-        ).unwrap();
+        let retry_count: i32 = conn
+            .query_row(
+                "SELECT retry_count FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(retry_count, 1);
     }
 
@@ -893,35 +1014,45 @@ mod tests {
     fn test_abandon_captcha_max_retries_fails_permanently() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
 
-        db::upsert_broker(&conn, &db::BrokerRow {
-            id: "broker1".into(),
-            name: "Broker".into(),
-            category: "people_search".into(),
-            opt_out_channel: "web_form".into(),
-            recheck_days: 90,
-            parent_company: None,
-            playbook_path: "p.yaml".into(),
-            trust_tier: "official".into(),
-            enabled: true,
-        }).unwrap();
+        db::upsert_broker(
+            &conn,
+            &db::BrokerRow {
+                id: "broker1".into(),
+                name: "Broker".into(),
+                category: "people_search".into(),
+                opt_out_channel: "web_form".into(),
+                recheck_days: 90,
+                parent_company: None,
+                playbook_path: "p.yaml".into(),
+                trust_tier: "official".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at, retry_count)
              VALUES ('broker1', 'captcha_blocked', 'web_form', datetime('now'), 4)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let task_id = conn.last_insert_rowid();
 
         match db::abandon_captcha_task(&conn, task_id).unwrap() {
-            db::CaptchaMutationResult::MaxRetriesExceeded => {},
+            db::CaptchaMutationResult::MaxRetriesExceeded => {}
             _ => panic!("Expected MaxRetriesExceeded (permanent failure)"),
         }
 
-        let status: String = conn.query_row(
-            "SELECT status FROM opt_out_tasks WHERE id = ?1", [task_id], |r| r.get(0),
-        ).unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM opt_out_tasks WHERE id = ?1",
+                [task_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(status, "failure");
     }
 
@@ -929,25 +1060,31 @@ mod tests {
     fn test_get_task_proof_path() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let (conn, _) = db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
+        let (conn, _) =
+            db::create_db_with_params(&db_path, "test", &crate::crypto::TEST_PARAMS).unwrap();
 
-        db::upsert_broker(&conn, &db::BrokerRow {
-            id: "broker1".into(),
-            name: "Broker".into(),
-            category: "people_search".into(),
-            opt_out_channel: "web_form".into(),
-            recheck_days: 90,
-            parent_company: None,
-            playbook_path: "p.yaml".into(),
-            trust_tier: "official".into(),
-            enabled: true,
-        }).unwrap();
+        db::upsert_broker(
+            &conn,
+            &db::BrokerRow {
+                id: "broker1".into(),
+                name: "Broker".into(),
+                category: "people_search".into(),
+                opt_out_channel: "web_form".into(),
+                recheck_days: 90,
+                parent_company: None,
+                playbook_path: "p.yaml".into(),
+                trust_tier: "official".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO opt_out_tasks (broker_id, status, channel, created_at, proof_path)
              VALUES ('broker1', 'success', 'web_form', datetime('now'), 'proofs/test.png.enc')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let task_id = conn.last_insert_rowid();
 
         let path = db::get_task_proof_path(&conn, task_id).unwrap();

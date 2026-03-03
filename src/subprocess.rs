@@ -68,8 +68,7 @@ impl SubprocessManager {
     pub async fn spawn(data_dir: &Path) -> Result<Self> {
         let worker_script = find_worker_script(data_dir)?;
         let worker_home = data_dir.join("worker_home");
-        std::fs::create_dir_all(&worker_home)
-            .context("Failed to create worker HOME directory")?;
+        std::fs::create_dir_all(&worker_home).context("Failed to create worker HOME directory")?;
 
         #[cfg(unix)]
         {
@@ -94,9 +93,13 @@ impl SubprocessManager {
             .spawn()
             .with_context(|| format!("Failed to spawn worker: node {}", worker_script.display()))?;
 
-        let stdin = child.stdin.take()
+        let stdin = child
+            .stdin
+            .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture worker stdin"))?;
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture worker stdout"))?;
 
         let stdout_reader = BufReader::new(stdout);
@@ -128,14 +131,18 @@ impl SubprocessManager {
         cancel: &CancellationToken,
     ) -> Result<WorkerTaskResult> {
         // Serialize task as JSON line
-        let mut json = serde_json::to_string(input)
-            .context("Failed to serialize worker task input")?;
+        let mut json =
+            serde_json::to_string(input).context("Failed to serialize worker task input")?;
         json.push('\n');
 
         // Send to worker stdin
-        self.stdin.write_all(json.as_bytes()).await
+        self.stdin
+            .write_all(json.as_bytes())
+            .await
             .context("Failed to write to worker stdin")?;
-        self.stdin.flush().await
+        self.stdin
+            .flush()
+            .await
             .context("Failed to flush worker stdin")?;
 
         // Wait for result line from stdout
@@ -174,7 +181,9 @@ impl SubprocessManager {
 
         let mut buf = Vec::with_capacity(8192);
         loop {
-            let available = reader.fill_buf().await
+            let available = reader
+                .fill_buf()
+                .await
                 .context("Failed to read from worker stdout")?;
 
             if available.is_empty() {
@@ -199,19 +208,31 @@ impl SubprocessManager {
             }
 
             if buf.len() >= MAX_LINE_LENGTH {
-                tracing::warn!(bytes = buf.len(), "Worker output exceeds {}B, truncating", MAX_LINE_LENGTH);
+                tracing::warn!(
+                    bytes = buf.len(),
+                    "Worker output exceeds {}B, truncating",
+                    MAX_LINE_LENGTH
+                );
                 // CONS-R4-003: Discard remaining bytes until newline or EOF.
                 // Propagate IO errors instead of swallowing them.
                 loop {
-                    let rest = reader.fill_buf().await
+                    let rest = reader
+                        .fill_buf()
+                        .await
                         .context("IO error while discarding oversized worker output")?;
-                    if rest.is_empty() { break; }
-                    let end = rest.iter().position(|&b| b == b'\n')
+                    if rest.is_empty() {
+                        break;
+                    }
+                    let end = rest
+                        .iter()
+                        .position(|&b| b == b'\n')
                         .map(|p| p + 1)
                         .unwrap_or(rest.len());
                     let found_nl = end > 0 && rest[end - 1] == b'\n';
                     reader.consume(end);
-                    if found_nl { break; }
+                    if found_nl {
+                        break;
+                    }
                 }
                 break;
             }
@@ -229,7 +250,10 @@ impl SubprocessManager {
                 tracing::info!("Sent shutdown command to worker");
             }
             Err(e) => {
-                tracing::warn!("Failed to send shutdown command: {}. Worker may have already exited.", e);
+                tracing::warn!(
+                    "Failed to send shutdown command: {}. Worker may have already exited.",
+                    e
+                );
             }
         }
 
@@ -287,7 +311,11 @@ fn find_worker_script(data_dir: &Path) -> Result<PathBuf> {
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             // Direct sibling, one level up, two levels up (target/debug → project root)
-            for ancestor in [Some(exe_dir), exe_dir.parent(), exe_dir.parent().and_then(|p| p.parent())] {
+            for ancestor in [
+                Some(exe_dir),
+                exe_dir.parent(),
+                exe_dir.parent().and_then(|p| p.parent()),
+            ] {
                 if let Some(dir) = ancestor {
                     let script = dir.join("worker/dist/worker.js");
                     if script.exists() {
@@ -357,7 +385,10 @@ mod tests {
         assert_eq!(result.task_id, "123");
         assert_eq!(result.status, "success");
         assert!(result.proof.is_some());
-        assert_eq!(result.proof.as_ref().unwrap().confirmation_text, "Request received");
+        assert_eq!(
+            result.proof.as_ref().unwrap().confirmation_text,
+            "Request received"
+        );
         assert_eq!(result.duration_ms, 5000);
         assert!(result.error_code.is_none());
     }

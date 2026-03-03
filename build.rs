@@ -96,13 +96,19 @@ fn sha256_file(path: &Path) -> String {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
-    let mut file = fs::File::open(path)
-        .unwrap_or_else(|e| panic!("Failed to open tarball for hashing: {}: {}", path.display(), e));
+    let mut file = fs::File::open(path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to open tarball for hashing: {}: {}",
+            path.display(),
+            e
+        )
+    });
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
 
     loop {
-        let n = file.read(&mut buf)
+        let n = file
+            .read(&mut buf)
             .unwrap_or_else(|e| panic!("Failed to read {} for hashing: {}", path.display(), e));
         if n == 0 {
             break;

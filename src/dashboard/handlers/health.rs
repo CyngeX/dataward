@@ -41,35 +41,38 @@ pub struct RunSummaryDisplay {
 }
 
 /// Health page (GET /health).
-pub async fn health_page(
-    State(state): State<DashboardState>,
-) -> Result<Response, DashboardError> {
+pub async fn health_page(State(state): State<DashboardState>) -> Result<Response, DashboardError> {
     let state_clone = state.clone();
     let stats = tokio::task::spawn_blocking(move || {
         let conn = open_dashboard_db(&state_clone)?;
         db::get_health_stats(&conn)
             .map_err(|e| DashboardError::Internal(format!("Query error: {}", e)))
-    }).await
-        .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))??;
+    })
+    .await
+    .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))??;
 
-    let broker_health: Vec<BrokerHealthDisplay> = stats.broker_health.into_iter().map(|b| {
-        let (health_class, health_label) = if b.success_rate >= 80.0 {
-            ("success".into(), "Healthy".into())
-        } else if b.success_rate >= 50.0 {
-            ("warning".into(), "Degraded".into())
-        } else {
-            ("danger".into(), "Critical".into())
-        };
+    let broker_health: Vec<BrokerHealthDisplay> = stats
+        .broker_health
+        .into_iter()
+        .map(|b| {
+            let (health_class, health_label) = if b.success_rate >= 80.0 {
+                ("success".into(), "Healthy".into())
+            } else if b.success_rate >= 50.0 {
+                ("warning".into(), "Degraded".into())
+            } else {
+                ("danger".into(), "Critical".into())
+            };
 
-        BrokerHealthDisplay {
-            name: b.name,
-            success_rate: b.success_rate,
-            health_class,
-            health_label,
-            total_attempts: b.total_attempts,
-            successful: b.successful,
-        }
-    }).collect();
+            BrokerHealthDisplay {
+                name: b.name,
+                success_rate: b.success_rate,
+                health_class,
+                health_label,
+                total_attempts: b.total_attempts,
+                successful: b.successful,
+            }
+        })
+        .collect();
 
     let last_run_summary = stats.last_run.map(|r| RunSummaryDisplay {
         started_at: r.started_at,
@@ -93,7 +96,8 @@ pub async fn health_page(
         has_run_data: stats.has_run_data,
     };
 
-    let html = template.render()
+    let html = template
+        .render()
         .map_err(|e| DashboardError::Internal(format!("Template error: {}", e)))?;
 
     Ok(Html(html).into_response())

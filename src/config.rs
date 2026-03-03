@@ -166,7 +166,10 @@ impl Config {
     /// Validates config values are within acceptable ranges.
     fn validate(&self) -> Result<()> {
         if self.general.concurrency == 0 || self.general.concurrency > 3 {
-            anyhow::bail!("general.concurrency must be between 1 and 3 (got {})", self.general.concurrency);
+            anyhow::bail!(
+                "general.concurrency must be between 1 and 3 (got {})",
+                self.general.concurrency
+            );
         }
         if self.scheduler.interval_hours == 0 {
             anyhow::bail!("scheduler.interval_hours must be at least 1");
