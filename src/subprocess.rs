@@ -278,6 +278,7 @@ impl SubprocessManager {
     }
 
     /// Returns the worker process ID, if still running.
+    #[allow(dead_code)]
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }
