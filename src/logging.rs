@@ -156,8 +156,8 @@ pub fn sanitize_pii(input: &str) -> String {
             if let Some(rest) = output.get(value_start..) {
                 // Handle quoted values: "field": "value"
                 let trimmed = rest.trim_start();
-                if trimmed.starts_with('"') {
-                    if let Some(end) = trimmed[1..].find('"') {
+                if let Some(stripped) = trimmed.strip_prefix('"') {
+                    if let Some(end) = stripped.find('"') {
                         let full_end = value_start + (rest.len() - trimmed.len()) + 1 + end + 1;
                         output.replace_range(value_start..full_end, "\"[REDACTED]\"");
                         search_from = start + json_pattern.len() + "\"[REDACTED]\"".len();
@@ -198,6 +198,7 @@ pub fn sanitize_pii(input: &str) -> String {
 /// Checks whether a string contains any PII field names.
 ///
 /// Useful for asserting that log output is PII-free in tests.
+#[allow(dead_code)]
 pub fn contains_pii_fields(input: &str) -> bool {
     let lower = input.to_lowercase();
     for field in PII_FIELDS {

@@ -7,6 +7,7 @@ use crate::dashboard::{open_dashboard_db, DashboardError, DashboardState};
 use crate::db;
 
 /// Status row for display in template.
+#[allow(dead_code)]
 pub struct BrokerStatusDisplay {
     pub id: String,
     pub name: String,
@@ -29,6 +30,7 @@ pub struct BrokerStatusDisplay {
 
 #[derive(Template)]
 #[template(path = "status.html")]
+#[allow(dead_code)]
 struct StatusPageTemplate {
     brokers: Vec<BrokerStatusDisplay>,
     csrf_token: String,
@@ -36,6 +38,7 @@ struct StatusPageTemplate {
 
 #[derive(Template)]
 #[template(path = "status_table.html")]
+#[allow(dead_code)]
 struct StatusTablePartialTemplate {
     brokers: Vec<BrokerStatusDisplay>,
     csrf_token: String,

@@ -43,6 +43,7 @@ pub struct DashboardState {
     /// Hex key for opening DB connections (SecretString for zeroize-on-drop).
     pub db_hex_key: SecretString,
     /// Channel to send write operations to the DB writer task.
+    #[allow(dead_code)]
     pub write_tx: mpsc::Sender<db::DbWriteMessage>,
     /// Channel to wake the scheduler for immediate re-run.
     pub scheduler_notify: mpsc::Sender<()>,

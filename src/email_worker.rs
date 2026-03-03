@@ -217,6 +217,7 @@ pub async fn send_opt_out_email(
 }
 
 /// Builds the opt-out email body.
+#[allow(clippy::too_many_arguments)]
 fn build_opt_out_email_body(
     first_name: &str,
     last_name: &str,

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +22,7 @@ pub struct WorkerTaskInput {
 
 /// Task result received from the worker subprocess via stdout JSON-lines.
 #[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct WorkerTaskResult {
     pub task_id: String,
     pub status: String,
@@ -44,6 +45,7 @@ pub struct WorkerProofInfo {
 /// The subprocess runs `node worker/dist/worker.js` with an isolated HOME
 /// directory and cleared environment. Communication is via JSON-lines on
 /// stdin (tasks) and stdout (results). All diagnostics go to stderr.
+#[allow(dead_code)]
 pub struct SubprocessManager {
     child: Child,
     /// BufReader over the child's stdout, with max line length.
@@ -311,17 +313,18 @@ fn find_worker_script(data_dir: &Path) -> Result<PathBuf> {
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             // Direct sibling, one level up, two levels up (target/debug → project root)
-            for ancestor in [
+            for dir in [
                 Some(exe_dir),
                 exe_dir.parent(),
                 exe_dir.parent().and_then(|p| p.parent()),
-            ] {
-                if let Some(dir) = ancestor {
-                    let script = dir.join("worker/dist/worker.js");
-                    if script.exists() {
-                        tracing::info!(path = %script.display(), tier = "development", "Worker script found");
-                        return Ok(script);
-                    }
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let script = dir.join("worker/dist/worker.js");
+                if script.exists() {
+                    tracing::info!(path = %script.display(), tier = "development", "Worker script found");
+                    return Ok(script);
                 }
             }
         }

@@ -25,6 +25,7 @@ const WORKER_TARBALL_HASH: &str = include_str!(concat!(env!("OUT_DIR"), "/worker
 const SENTINEL_FILE: &str = ".worker-version";
 
 /// Lock file for preventing concurrent init.
+#[cfg(feature = "embedded-worker")]
 const INIT_LOCK_FILE: &str = ".init-lock";
 
 /// Timeout for quick local subprocesses (node --version, chromium check).
@@ -173,7 +174,7 @@ fn get_embedded_hash() -> &'static str {
 ///
 /// Uses a temporary directory + atomic rename for crash safety.
 /// Validates all paths against the target directory to prevent path traversal.
-fn extract_worker_tarball(data_dir: &Path) -> Result<()> {
+fn extract_worker_tarball(_data_dir: &Path) -> Result<()> {
     #[cfg(not(feature = "embedded-worker"))]
     {
         anyhow::bail!(
@@ -294,6 +295,7 @@ fn extract_worker_tarball(data_dir: &Path) -> Result<()> {
 /// - Absolute paths
 /// - Path components containing ".."
 /// - Paths with null bytes
+#[cfg(feature = "embedded-worker")]
 fn validate_archive_entry_path(path: &Path) -> Result<()> {
     // Reject absolute paths
     if path.is_absolute() {
@@ -324,6 +326,7 @@ fn validate_archive_entry_path(path: &Path) -> Result<()> {
 /// Acquires an exclusive init lock file.
 ///
 /// Prevents concurrent init processes from corrupting the worker directory.
+#[cfg(feature = "embedded-worker")]
 fn acquire_init_lock(data_dir: &Path) -> Result<std::fs::File> {
     use fs2::FileExt;
 
@@ -552,6 +555,7 @@ mod tests {
         assert!(parse_node_major_version("").is_err());
     }
 
+    #[cfg(feature = "embedded-worker")]
     #[test]
     fn test_validate_path_normal() {
         assert!(validate_archive_entry_path(Path::new("dist/worker.js")).is_ok());
@@ -559,6 +563,7 @@ mod tests {
         assert!(validate_archive_entry_path(Path::new("dist/sub/file.js")).is_ok());
     }
 
+    #[cfg(feature = "embedded-worker")]
     #[test]
     fn test_validate_path_traversal() {
         assert!(validate_archive_entry_path(Path::new("../etc/passwd")).is_err());
@@ -566,12 +571,14 @@ mod tests {
         assert!(validate_archive_entry_path(Path::new("a/b/../../../c")).is_err());
     }
 
+    #[cfg(feature = "embedded-worker")]
     #[test]
     fn test_validate_path_absolute() {
         assert!(validate_archive_entry_path(Path::new("/etc/passwd")).is_err());
         assert!(validate_archive_entry_path(Path::new("/tmp/evil")).is_err());
     }
 
+    #[cfg(feature = "embedded-worker")]
     #[test]
     fn test_validate_path_null_byte() {
         assert!(validate_archive_entry_path(Path::new("dist/file\0.js")).is_err());
@@ -614,6 +621,7 @@ mod tests {
         assert!(needs_extraction(&worker_dir).unwrap());
     }
 
+    #[cfg(feature = "embedded-worker")]
     #[test]
     fn test_init_lock_prevents_concurrent() {
         let dir = tempfile::tempdir().unwrap();
@@ -628,6 +636,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "embedded-worker")]
     #[test]
     fn test_init_lock_released_on_drop() {
         let dir = tempfile::tempdir().unwrap();

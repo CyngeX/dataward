@@ -320,6 +320,7 @@ async fn run_once(
 }
 
 /// Runs the scheduler in daemon mode with periodic ticks.
+#[allow(clippy::too_many_arguments)]
 async fn run_daemon(
     read_conn: &rusqlite::Connection,
     db_tx: &mpsc::Sender<db::DbWriteMessage>,
@@ -443,8 +444,10 @@ async fn dispatch_tasks(
     data_dir: &Path,
     cancel: &CancellationToken,
 ) -> Result<RunSummary> {
-    let mut summary = RunSummary::default();
-    summary.total = due_tasks.len() as i32;
+    let mut summary = RunSummary {
+        total: due_tasks.len() as i32,
+        ..RunSummary::default()
+    };
 
     if due_tasks.is_empty() {
         return Ok(summary);
@@ -1097,6 +1100,7 @@ fn acquire_pid_lock(data_dir: &Path) -> Result<PidLock> {
     // CONS-R2-020: Open WITHOUT truncate, lock first, then truncate and write
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&pid_path)

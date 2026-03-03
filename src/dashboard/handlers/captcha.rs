@@ -7,6 +7,7 @@ use crate::dashboard::{open_dashboard_db, DashboardError, DashboardState};
 use crate::db;
 
 /// CAPTCHA queue row for display in template.
+#[allow(dead_code)]
 pub struct CaptchaDisplay {
     pub id: i64,
     pub broker_id: String,
@@ -22,6 +23,7 @@ pub struct CaptchaDisplay {
 
 #[derive(Template)]
 #[template(path = "captcha.html")]
+#[allow(dead_code)]
 struct CaptchaPageTemplate {
     items: Vec<CaptchaDisplay>,
     csrf_token: String,
@@ -29,6 +31,7 @@ struct CaptchaPageTemplate {
 
 #[derive(Template)]
 #[template(path = "captcha_queue.html")]
+#[allow(dead_code)]
 struct CaptchaQueuePartialTemplate {
     items: Vec<CaptchaDisplay>,
     csrf_token: String,

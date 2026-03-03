@@ -30,6 +30,7 @@ const TRUST_TIERS: &[(&str, &str)] = &[
 
 /// A parsed and validated playbook.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Playbook {
     pub broker: BrokerDefinition,
     pub required_fields: Vec<String>,
@@ -112,6 +113,7 @@ pub struct ClickParams {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 pub struct SelectParams {
     pub selector: String,
     #[serde(alias = "value_or_field")]
@@ -132,6 +134,7 @@ pub struct ScreenshotParams {
 
 /// Validated playbook step.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum PlaybookStep {
     Navigate(String),
     Fill(FillParams),

@@ -60,6 +60,7 @@ pub fn scheduler_tick(read_conn: &Connection, playbooks_dir: &Path) -> Result<Ti
 ///
 /// Returns the user data map if all fields are present, or an error describing
 /// which fields are missing.
+#[allow(dead_code)]
 pub fn validate_required_fields(
     read_conn: &Connection,
     required_fields: &[String],

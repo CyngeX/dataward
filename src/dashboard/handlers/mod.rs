@@ -71,7 +71,7 @@ pub async fn login_submit(
     {
         let mut attempts = state.login_attempts.lock().await;
         let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(60);
-        while attempts.front().map_or(false, |t| *t < cutoff) {
+        while attempts.front().is_some_and(|t| *t < cutoff) {
             attempts.pop_front();
         }
         if attempts.len() >= super::LOGIN_RATE_LIMIT as usize {

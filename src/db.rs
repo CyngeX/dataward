@@ -355,6 +355,7 @@ pub fn reset_orphaned_tasks(conn: &Connection) -> Result<usize> {
 
 /// A task that is due for execution.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DueTask {
     pub id: i64,
     pub broker_id: String,
@@ -450,12 +451,14 @@ pub fn mark_task_running(conn: &Connection, task_id: i64) -> Result<bool> {
 }
 
 /// Exponential backoff durations for retries: 1h, 4h, 24h, 72h.
+#[allow(dead_code)]
 const RETRY_BACKOFFS: &[i64] = &[3600, 14400, 86400, 259200];
 
 /// Calculates the next retry time based on retry count.
 ///
 /// Returns offset in seconds from now. After exhausting RETRY_BACKOFFS,
 /// returns the last value (72h).
+#[allow(dead_code)]
 pub fn retry_backoff_secs(retry_count: i32) -> i64 {
     let idx = (retry_count.max(0) as usize).min(RETRY_BACKOFFS.len() - 1);
     RETRY_BACKOFFS[idx]
@@ -1063,6 +1066,7 @@ pub fn abandon_captcha_task(conn: &Connection, task_id: i64) -> Result<CaptchaMu
 }
 
 /// Checks if a task is expired (created_at + 24h < now).
+#[allow(dead_code)]
 fn check_task_expired(created_at: &str) -> bool {
     let created = chrono::NaiveDateTime::parse_from_str(created_at, "%Y-%m-%d %H:%M:%S")
         .or_else(|_| chrono::DateTime::parse_from_rfc3339(created_at).map(|dt| dt.naive_utc()));
@@ -1288,6 +1292,7 @@ pub enum DbWriteMessage {
         delay_recheck_days: Option<i32>,
     },
     /// Insert a new opt-out task.
+    #[allow(dead_code)]
     InsertTask { broker_id: String, channel: String },
     /// Record a successful task completion with recheck scheduling.
     CompleteTaskSuccess {
@@ -1335,20 +1340,11 @@ pub fn spawn_writer(
         // Journal file handle: opened lazily on first use, held open for reuse.
         let mut journal_file: Option<std::fs::File> = None;
 
-        loop {
-            // Receive at least one message (blocking).
-            let first = match rx.blocking_recv() {
-                Some(msg) => msg,
-                None => break,
-            };
-
+        while let Some(first) = rx.blocking_recv() {
             // Drain any additional pending messages into a batch.
             let mut batch = vec![first];
-            loop {
-                match rx.try_recv() {
-                    Ok(msg) => batch.push(msg),
-                    Err(_) => break,
-                }
+            while let Ok(msg) = rx.try_recv() {
+                batch.push(msg);
             }
 
             // Check for shutdown in the batch.

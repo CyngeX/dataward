@@ -45,6 +45,7 @@ pub const TEST_PARAMS: Argon2Params = Argon2Params {
 ///
 /// Returns (key, salt). The salt must be stored alongside the encrypted data
 /// for key re-derivation.
+#[allow(dead_code)]
 pub fn derive_key(passphrase: &[u8], salt: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>)> {
     derive_key_with_params(passphrase, salt, &PRODUCTION_PARAMS)
 }
@@ -92,6 +93,7 @@ pub fn key_to_sqlcipher_hex(key: &[u8]) -> String {
 /// Encrypts data using AES-256-GCM.
 ///
 /// Returns (nonce || ciphertext). The nonce is prepended to simplify storage.
+#[allow(dead_code)]
 pub fn encrypt_aes256gcm(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("Invalid AES-256-GCM key: {}", e))?;
@@ -135,6 +137,7 @@ pub fn decrypt_aes256gcm(key: &[u8], encrypted: &[u8]) -> Result<Vec<u8>> {
 /// Encrypts a file on disk using AES-256-GCM.
 ///
 /// Reads the file, encrypts it, writes to `path.enc`, then deletes the original.
+#[allow(dead_code)]
 pub fn encrypt_file(key: &[u8], path: &Path) -> Result<std::path::PathBuf> {
     let plaintext = std::fs::read(path)
         .with_context(|| format!("Failed to read file for encryption: {}", path.display()))?;

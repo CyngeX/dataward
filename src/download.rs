@@ -7,6 +7,7 @@ use std::path::Path;
 ///
 /// Uses constant-time comparison via the `subtle` crate to prevent
 /// timing side-channel leakage.
+#[allow(dead_code)]
 pub fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<()> {
     let digest = Sha256::digest(data);
     let actual_hex = hex::encode(digest);
@@ -41,6 +42,7 @@ pub fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<()> {
 }
 
 /// Computes SHA-256 of a byte slice, returning the hex digest.
+#[allow(dead_code)]
 pub fn sha256_hex(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
     hex::encode(digest)
@@ -49,6 +51,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// Computes SHA-256 of a file using streaming (BufReader chunks).
 ///
 /// Never loads the entire file into memory — processes in 64KB chunks.
+#[allow(dead_code)]
 pub fn sha256_file(path: &Path) -> Result<String> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open file for checksum: {}", path.display()))?;
@@ -75,6 +78,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 /// The temp file is created in the same directory as the target to guarantee
 /// the rename is atomic (same mount point). If the write or rename fails,
 /// the temp file is cleaned up.
+#[allow(dead_code)]
 pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
     let parent = target
         .parent()
@@ -115,7 +119,7 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
     })?;
 
     // Rename succeeded — defuse the guard so it doesn't delete the target.
-    let _ = scopeguard::ScopeGuard::into_inner(_guard);
+    scopeguard::ScopeGuard::into_inner(_guard);
 
     Ok(())
 }
@@ -124,6 +128,7 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
 ///
 /// Writes to `.tmp`, computes streaming checksum, verifies against expected,
 /// then renames into place. On checksum mismatch, the temp file is deleted.
+#[allow(dead_code)]
 pub fn atomic_write_verified(target: &Path, data: &[u8], expected_sha256: &str) -> Result<()> {
     verify_sha256(data, expected_sha256)?;
     atomic_write(target, data)
