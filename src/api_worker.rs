@@ -100,10 +100,7 @@ pub async fn send_opt_out_api(
     };
 
     if status.is_success() {
-        let confirmation = format!(
-            "API opt-out request accepted (HTTP {})",
-            status.as_u16()
-        );
+        let confirmation = format!("API opt-out request accepted (HTTP {})", status.as_u16());
         tracing::info!(
             broker_id,
             status = status.as_u16(),
@@ -122,7 +119,8 @@ pub async fn send_opt_out_api(
         // CONS-R2-014: Use char-based truncation to avoid UTF-8 boundary panic
         // CONS-R2-008: Only store HTTP status + truncated body
         // CONS-R3-011: Strip non-printable control chars to keep logs/DB clean
-        let truncated_body: String = body.chars()
+        let truncated_body: String = body
+            .chars()
             .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
             .take(200)
             .collect();
@@ -190,16 +188,15 @@ mod tests {
     #[tokio::test]
     async fn test_send_opt_out_api_rejects_http() {
         let client = create_api_client().unwrap();
-        let user_data = HashMap::from([
-            ("first_name".to_string(), "John".to_string()),
-        ]);
+        let user_data = HashMap::from([("first_name".to_string(), "John".to_string())]);
 
         let result = send_opt_out_api(
             &client,
             "http://insecure.example.com/optout",
             &user_data,
             "test-broker",
-        ).await;
+        )
+        .await;
 
         assert!(!result.success);
         assert_eq!(result.error_code.as_deref(), Some("domain_violation"));

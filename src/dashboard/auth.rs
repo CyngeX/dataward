@@ -19,11 +19,9 @@ const ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]"];
 ///
 /// Rejects requests with non-localhost Host headers to prevent DNS rebinding attacks.
 /// Must be applied before auth middleware.
-pub async fn validate_host(
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    let host_header = request.headers()
+pub async fn validate_host(request: Request<Body>, next: Next) -> Response {
+    let host_header = request
+        .headers()
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok());
 
@@ -37,16 +35,14 @@ pub async fn validate_host(
                 return (
                     StatusCode::FORBIDDEN,
                     "Forbidden: Dashboard only accessible via localhost",
-                ).into_response();
+                )
+                    .into_response();
             }
         }
         None => {
             // HTTP/1.1 requires Host header; reject if missing
             tracing::warn!("Rejected request: missing Host header");
-            return (
-                StatusCode::BAD_REQUEST,
-                "Bad Request: Missing Host header",
-            ).into_response();
+            return (StatusCode::BAD_REQUEST, "Bad Request: Missing Host header").into_response();
         }
     }
 
@@ -117,7 +113,8 @@ pub async fn require_auth(
     }
 
     // No valid auth — redirect browser to login, 401 for API
-    let accepts_html = request.headers()
+    let accepts_html = request
+        .headers()
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.contains("text/html"))
@@ -137,22 +134,24 @@ pub async fn require_auth(
 /// - Form body field named "csrf_token" (traditional form submissions)
 ///
 /// The token is compared against the csrf_token cookie value.
-pub fn verify_csrf(
-    request: &Request<Body>,
-) -> Result<(), super::DashboardError> {
-    let header_token = request.headers()
+pub fn verify_csrf(request: &Request<Body>) -> Result<(), super::DashboardError> {
+    let header_token = request
+        .headers()
         .get(super::CSRF_HEADER_NAME)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let cookie_token = request.headers()
+    let cookie_token = request
+        .headers()
         .get(axum::http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| extract_cookie(cookies, crate::dashboard::CSRF_COOKIE_NAME))
         .unwrap_or("");
 
     if cookie_token.is_empty() {
-        return Err(super::DashboardError::Forbidden("CSRF token missing".into()));
+        return Err(super::DashboardError::Forbidden(
+            "CSRF token missing".into(),
+        ));
     }
 
     // Accept token from header (htmx) — primary path
@@ -160,12 +159,16 @@ pub fn verify_csrf(
         if constant_time_eq(header_token.as_bytes(), cookie_token.as_bytes()) {
             return Ok(());
         }
-        return Err(super::DashboardError::Forbidden("CSRF token mismatch".into()));
+        return Err(super::DashboardError::Forbidden(
+            "CSRF token mismatch".into(),
+        ));
     }
 
     // No header token — this will be checked from the form body by the caller
     // (login_submit parses the body and calls verify_csrf_form_token)
-    Err(super::DashboardError::Forbidden("CSRF token missing".into()))
+    Err(super::DashboardError::Forbidden(
+        "CSRF token missing".into(),
+    ))
 }
 
 /// CSRF validation using a form body field value (for traditional form POSTs like login).
@@ -181,11 +184,15 @@ pub fn verify_csrf_form_token(
         .unwrap_or("");
 
     if cookie_token.is_empty() || form_csrf_token.is_empty() {
-        return Err(super::DashboardError::Forbidden("CSRF token missing".into()));
+        return Err(super::DashboardError::Forbidden(
+            "CSRF token missing".into(),
+        ));
     }
 
     if !constant_time_eq(form_csrf_token.as_bytes(), cookie_token.as_bytes()) {
-        return Err(super::DashboardError::Forbidden("CSRF token mismatch".into()));
+        return Err(super::DashboardError::Forbidden(
+            "CSRF token mismatch".into(),
+        ));
     }
 
     Ok(())
@@ -203,7 +210,8 @@ pub fn generate_csrf_token() -> Result<String, super::DashboardError> {
 pub fn csrf_cookie_header(token: &str) -> String {
     format!(
         "{}={}; SameSite=Strict; Path=/",
-        crate::dashboard::CSRF_COOKIE_NAME, token
+        crate::dashboard::CSRF_COOKIE_NAME,
+        token
     )
 }
 
@@ -220,7 +228,8 @@ pub fn create_session_cookie(state: &DashboardState) -> Result<String, super::Da
         .map_err(|e| super::DashboardError::Internal(format!("HMAC error: {}", e)))?;
     mac.update(payload.as_bytes());
     let signature = mac.finalize().into_bytes();
-    let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, signature);
+    let sig_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, signature);
 
     Ok(format!("{}.{}", payload, sig_b64))
 }
@@ -260,10 +269,11 @@ fn verify_session_cookie(cookie_value: &str, state: &DashboardState) -> bool {
     };
     mac.update(payload.as_bytes());
 
-    let expected_sig = match base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig_b64) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
+    let expected_sig =
+        match base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig_b64) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
 
     if mac.finalize().into_bytes().ct_eq(&expected_sig).into() {
         // Signature valid — check payload
@@ -335,7 +345,10 @@ mod tests {
         assert_eq!(extract_host_without_port("[::1]:8080"), "[::1]");
         assert_eq!(extract_host_without_port("LOCALHOST"), "LOCALHOST");
         assert_eq!(extract_host_without_port("evil.com"), "evil.com");
-        assert_eq!(extract_host_without_port("localhost.evil.com"), "localhost.evil.com");
+        assert_eq!(
+            extract_host_without_port("localhost.evil.com"),
+            "localhost.evil.com"
+        );
         // Null byte defense
         assert_eq!(extract_host_without_port("localhost\x00.evil.com"), "");
     }

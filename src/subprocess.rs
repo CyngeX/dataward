@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +22,7 @@ pub struct WorkerTaskInput {
 
 /// Task result received from the worker subprocess via stdout JSON-lines.
 #[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct WorkerTaskResult {
     pub task_id: String,
     pub status: String,
@@ -44,6 +45,7 @@ pub struct WorkerProofInfo {
 /// The subprocess runs `node worker/dist/worker.js` with an isolated HOME
 /// directory and cleared environment. Communication is via JSON-lines on
 /// stdin (tasks) and stdout (results). All diagnostics go to stderr.
+#[allow(dead_code)]
 pub struct SubprocessManager {
     child: Child,
     /// BufReader over the child's stdout, with max line length.
@@ -68,8 +70,7 @@ impl SubprocessManager {
     pub async fn spawn(data_dir: &Path) -> Result<Self> {
         let worker_script = find_worker_script(data_dir)?;
         let worker_home = data_dir.join("worker_home");
-        std::fs::create_dir_all(&worker_home)
-            .context("Failed to create worker HOME directory")?;
+        std::fs::create_dir_all(&worker_home).context("Failed to create worker HOME directory")?;
 
         #[cfg(unix)]
         {
@@ -94,9 +95,13 @@ impl SubprocessManager {
             .spawn()
             .with_context(|| format!("Failed to spawn worker: node {}", worker_script.display()))?;
 
-        let stdin = child.stdin.take()
+        let stdin = child
+            .stdin
+            .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture worker stdin"))?;
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture worker stdout"))?;
 
         let stdout_reader = BufReader::new(stdout);
@@ -128,14 +133,18 @@ impl SubprocessManager {
         cancel: &CancellationToken,
     ) -> Result<WorkerTaskResult> {
         // Serialize task as JSON line
-        let mut json = serde_json::to_string(input)
-            .context("Failed to serialize worker task input")?;
+        let mut json =
+            serde_json::to_string(input).context("Failed to serialize worker task input")?;
         json.push('\n');
 
         // Send to worker stdin
-        self.stdin.write_all(json.as_bytes()).await
+        self.stdin
+            .write_all(json.as_bytes())
+            .await
             .context("Failed to write to worker stdin")?;
-        self.stdin.flush().await
+        self.stdin
+            .flush()
+            .await
             .context("Failed to flush worker stdin")?;
 
         // Wait for result line from stdout
@@ -174,7 +183,9 @@ impl SubprocessManager {
 
         let mut buf = Vec::with_capacity(8192);
         loop {
-            let available = reader.fill_buf().await
+            let available = reader
+                .fill_buf()
+                .await
                 .context("Failed to read from worker stdout")?;
 
             if available.is_empty() {
@@ -199,19 +210,31 @@ impl SubprocessManager {
             }
 
             if buf.len() >= MAX_LINE_LENGTH {
-                tracing::warn!(bytes = buf.len(), "Worker output exceeds {}B, truncating", MAX_LINE_LENGTH);
+                tracing::warn!(
+                    bytes = buf.len(),
+                    "Worker output exceeds {}B, truncating",
+                    MAX_LINE_LENGTH
+                );
                 // CONS-R4-003: Discard remaining bytes until newline or EOF.
                 // Propagate IO errors instead of swallowing them.
                 loop {
-                    let rest = reader.fill_buf().await
+                    let rest = reader
+                        .fill_buf()
+                        .await
                         .context("IO error while discarding oversized worker output")?;
-                    if rest.is_empty() { break; }
-                    let end = rest.iter().position(|&b| b == b'\n')
+                    if rest.is_empty() {
+                        break;
+                    }
+                    let end = rest
+                        .iter()
+                        .position(|&b| b == b'\n')
                         .map(|p| p + 1)
                         .unwrap_or(rest.len());
                     let found_nl = end > 0 && rest[end - 1] == b'\n';
                     reader.consume(end);
-                    if found_nl { break; }
+                    if found_nl {
+                        break;
+                    }
                 }
                 break;
             }
@@ -229,7 +252,10 @@ impl SubprocessManager {
                 tracing::info!("Sent shutdown command to worker");
             }
             Err(e) => {
-                tracing::warn!("Failed to send shutdown command: {}. Worker may have already exited.", e);
+                tracing::warn!(
+                    "Failed to send shutdown command: {}. Worker may have already exited.",
+                    e
+                );
             }
         }
 
@@ -252,55 +278,80 @@ impl SubprocessManager {
     }
 
     /// Returns the worker process ID, if still running.
+    #[allow(dead_code)]
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }
 }
 
-/// Finds the worker script path.
+/// Finds the worker script path using explicit 3-tier precedence.
 ///
-/// Searches for `worker/dist/worker.js` relative to the binary's directory
-/// and the project root.
+/// Search order:
+/// 1. `DATAWARD_WORKER_PATH` env var (explicit override)
+/// 2. Adjacent to executable / project root (development)
+/// 3. `data_dir/worker/dist/worker.js` (production — extracted by `dataward init`)
 fn find_worker_script(data_dir: &Path) -> Result<PathBuf> {
-    // Try relative to the current executable
+    // Tier 1: Explicit env var override
+    if let Ok(env_path) = std::env::var("DATAWARD_WORKER_PATH") {
+        let path = PathBuf::from(&env_path);
+        if path.exists() {
+            if !env_path.ends_with("worker.js") {
+                tracing::warn!(
+                    path = %env_path,
+                    "DATAWARD_WORKER_PATH does not end with 'worker.js' — ensure it points to the correct script"
+                );
+            }
+            tracing::info!(path = %path.display(), tier = "env-override", "Worker script found");
+            return Ok(path);
+        }
+        tracing::warn!(
+            path = %env_path,
+            "DATAWARD_WORKER_PATH set but file not found, falling through to other tiers"
+        );
+    }
+
+    // Tier 2: Adjacent to executable (development builds)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let script = exe_dir.join("worker/dist/worker.js");
-            if script.exists() {
-                return Ok(script);
-            }
-            // Try one level up (common in cargo builds: target/debug/dataward)
-            if let Some(parent) = exe_dir.parent() {
-                let script = parent.join("worker/dist/worker.js");
+            // Direct sibling, one level up, two levels up (target/debug → project root)
+            for dir in [
+                Some(exe_dir),
+                exe_dir.parent(),
+                exe_dir.parent().and_then(|p| p.parent()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let script = dir.join("worker/dist/worker.js");
                 if script.exists() {
+                    tracing::info!(path = %script.display(), tier = "development", "Worker script found");
                     return Ok(script);
-                }
-                // Try two levels up (target/debug -> target -> project root)
-                if let Some(grandparent) = parent.parent() {
-                    let script = grandparent.join("worker/dist/worker.js");
-                    if script.exists() {
-                        return Ok(script);
-                    }
                 }
             }
         }
     }
 
-    // Try relative to current working directory
+    // Also check CWD for development convenience
     let cwd_script = PathBuf::from("worker/dist/worker.js");
     if cwd_script.exists() {
+        tracing::info!(path = %cwd_script.display(), tier = "development-cwd", "Worker script found");
         return Ok(cwd_script);
     }
 
-    // Try in data_dir
+    // Tier 3: Production path (extracted by dataward init)
     let data_script = data_dir.join("worker/dist/worker.js");
     if data_script.exists() {
+        tracing::info!(path = %data_script.display(), tier = "production", "Worker script found");
         return Ok(data_script);
     }
 
     anyhow::bail!(
-        "Worker script not found. Expected at worker/dist/worker.js. \
-         Run `cd worker && npm run build` to compile the TypeScript worker."
+        "Worker script not found. Run `dataward init` to set up the worker runtime.\n\
+         Checked locations:\n\
+         - DATAWARD_WORKER_PATH env var (not set or file missing)\n\
+         - Adjacent to binary (development builds)\n\
+         - {} (production)",
+        data_script.display(),
     )
 }
 
@@ -338,7 +389,10 @@ mod tests {
         assert_eq!(result.task_id, "123");
         assert_eq!(result.status, "success");
         assert!(result.proof.is_some());
-        assert_eq!(result.proof.as_ref().unwrap().confirmation_text, "Request received");
+        assert_eq!(
+            result.proof.as_ref().unwrap().confirmation_text,
+            "Request received"
+        );
         assert_eq!(result.duration_ms, 5000);
         assert!(result.error_code.is_none());
     }

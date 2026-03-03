@@ -3,11 +3,7 @@ use std::io;
 use std::path::Path;
 use tracing_appender::rolling;
 use tracing_subscriber::{
-    fmt,
-    fmt::MakeWriter,
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-    EnvFilter, Layer,
+    fmt, fmt::MakeWriter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
 };
 
 /// PII field names that must be redacted from all log output.
@@ -106,11 +102,13 @@ pub fn init_logging(data_dir: &Path, level: &str) -> Result<()> {
 
     let file_appender = rolling::daily(&log_dir, "dataward.log");
 
-    let env_filter = EnvFilter::try_new(level)
-        .unwrap_or_else(|_| {
-            eprintln!("Warning: Invalid log level '{}', defaulting to 'info'", level);
-            EnvFilter::new("info")
-        });
+    let env_filter = EnvFilter::try_new(level).unwrap_or_else(|_| {
+        eprintln!(
+            "Warning: Invalid log level '{}', defaulting to 'info'",
+            level
+        );
+        EnvFilter::new("info")
+    });
 
     // Stderr layer with PII sanitization
     let stderr_layer = fmt::layer()
@@ -119,14 +117,18 @@ pub fn init_logging(data_dir: &Path, level: &str) -> Result<()> {
         .with_filter(env_filter);
 
     // File layer with JSON formatting and PII sanitization
-    let file_filter = EnvFilter::try_new(level)
-        .unwrap_or_else(|_| {
-            eprintln!("Warning: Invalid log level '{}', defaulting to 'info'", level);
-            EnvFilter::new("info")
-        });
+    let file_filter = EnvFilter::try_new(level).unwrap_or_else(|_| {
+        eprintln!(
+            "Warning: Invalid log level '{}', defaulting to 'info'",
+            level
+        );
+        EnvFilter::new("info")
+    });
     let file_layer = fmt::layer()
         .json()
-        .with_writer(SanitizingMakeWriter { inner: file_appender })
+        .with_writer(SanitizingMakeWriter {
+            inner: file_appender,
+        })
         .with_filter(file_filter);
 
     tracing_subscriber::registry()
@@ -154,8 +156,8 @@ pub fn sanitize_pii(input: &str) -> String {
             if let Some(rest) = output.get(value_start..) {
                 // Handle quoted values: "field": "value"
                 let trimmed = rest.trim_start();
-                if trimmed.starts_with('"') {
-                    if let Some(end) = trimmed[1..].find('"') {
+                if let Some(stripped) = trimmed.strip_prefix('"') {
+                    if let Some(end) = stripped.find('"') {
                         let full_end = value_start + (rest.len() - trimmed.len()) + 1 + end + 1;
                         output.replace_range(value_start..full_end, "\"[REDACTED]\"");
                         search_from = start + json_pattern.len() + "\"[REDACTED]\"".len();
@@ -196,6 +198,7 @@ pub fn sanitize_pii(input: &str) -> String {
 /// Checks whether a string contains any PII field names.
 ///
 /// Useful for asserting that log output is PII-free in tests.
+#[allow(dead_code)]
 pub fn contains_pii_fields(input: &str) -> bool {
     let lower = input.to_lowercase();
     for field in PII_FIELDS {
@@ -273,7 +276,13 @@ mod tests {
     fn test_sanitize_json_multiple_occurrences_same_field() {
         let input = r#"{"email":"a@a.com","other":"x","email":"b@b.com"}"#;
         let output = sanitize_pii(input);
-        assert!(!output.contains("a@a.com"), "first occurrence should be redacted");
-        assert!(!output.contains("b@b.com"), "second occurrence should be redacted");
+        assert!(
+            !output.contains("a@a.com"),
+            "first occurrence should be redacted"
+        );
+        assert!(
+            !output.contains("b@b.com"),
+            "second occurrence should be redacted"
+        );
     }
 }

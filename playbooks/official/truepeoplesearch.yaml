@@ -1,0 +1,47 @@
+broker:
+  id: truepeoplesearch
+  name: TruePeopleSearch
+  url: https://www.truepeoplesearch.com
+  category: people_search
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains:
+    - www.truepeoplesearch.com
+    - truepeoplesearch.com
+
+required_fields:
+  - first_name
+  - last_name
+  - city
+  - state
+
+steps:
+  # Navigate to the opt-out/removal page
+  - navigate: "https://www.truepeoplesearch.com/removal"
+
+  # Wait for the page to fully load
+  - wait: { seconds: 2 }
+
+  # Fill in personal information for record lookup
+  - fill: { selector: "input[name='firstName']", field: "first_name" }
+  - fill: { selector: "input[name='lastName']", field: "last_name" }
+  - fill: { selector: "input[name='city']", field: "city" }
+  - fill: { selector: "input[name='state']", field: "state" }
+
+  # Submit the search to find the matching record
+  - click: { selector: "button[type='submit']" }
+
+  # Wait for search results
+  - wait: { seconds: 3 }
+
+  # Click the remove button on the first matching result
+  - click: { selector: ".remove-record-link" }
+
+  # Wait for removal confirmation page
+  - wait: { seconds: 2 }
+
+  # Capture proof of the removal request
+  - screenshot: { name: "removal_confirmation" }
+
+on_error: retry
+max_retries: 3

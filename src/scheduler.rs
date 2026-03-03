@@ -24,10 +24,7 @@ pub struct TickResult {
 /// 4. Insert a run_log entry.
 ///
 /// The caller (orchestrator) is responsible for dispatching the due tasks.
-pub fn scheduler_tick(
-    read_conn: &Connection,
-    playbooks_dir: &Path,
-) -> Result<TickResult> {
+pub fn scheduler_tick(read_conn: &Connection, playbooks_dir: &Path) -> Result<TickResult> {
     // 1. Re-load and sync playbooks
     let playbooks = broker_registry::load_playbooks(playbooks_dir)?;
     if !playbooks.is_empty() {
@@ -63,6 +60,7 @@ pub fn scheduler_tick(
 ///
 /// Returns the user data map if all fields are present, or an error describing
 /// which fields are missing.
+#[allow(dead_code)]
 pub fn validate_required_fields(
     read_conn: &Connection,
     required_fields: &[String],

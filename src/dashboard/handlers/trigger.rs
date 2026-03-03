@@ -1,20 +1,27 @@
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
 
-use crate::dashboard::{open_dashboard_db, DashboardError, DashboardState};
 use crate::dashboard::auth;
+use crate::dashboard::{open_dashboard_db, DashboardError, DashboardState};
 use crate::db;
 
 /// Allowed characters for broker_id: lowercase alphanumeric, underscore, hyphen.
 fn validate_broker_id(id: &str) -> Result<(), DashboardError> {
     if id.is_empty() {
-        return Err(DashboardError::BadRequest("Broker ID cannot be empty".into()));
+        return Err(DashboardError::BadRequest(
+            "Broker ID cannot be empty".into(),
+        ));
     }
     if id.len() > 64 {
         return Err(DashboardError::BadRequest("Broker ID too long".into()));
     }
-    if !id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-') {
-        return Err(DashboardError::BadRequest("Invalid broker ID characters".into()));
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return Err(DashboardError::BadRequest(
+            "Invalid broker ID characters".into(),
+        ));
     }
     Ok(())
 }
@@ -37,8 +44,9 @@ pub async fn trigger_rerun(
         let conn = open_dashboard_db(&state_clone)?;
         db::trigger_broker_rerun(&conn, &broker_id_clone)
             .map_err(|e| DashboardError::Internal(format!("Query error: {}", e)))
-    }).await
-        .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))??;
+    })
+    .await
+    .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))??;
 
     match result {
         db::RerunResult::Created(broker_name) => {
@@ -47,11 +55,12 @@ pub async fn trigger_rerun(
             Ok(Html(format!(
                 "<span class=\"badge success\">Re-run queued for {}</span>",
                 askama::MarkupDisplay::new_unsafe(&broker_name, askama::Html)
-            )).into_response())
+            ))
+            .into_response())
         }
-        db::RerunResult::AlreadyQueued => {
-            Err(DashboardError::Conflict("Task already queued for this broker".into()))
-        }
+        db::RerunResult::AlreadyQueued => Err(DashboardError::Conflict(
+            "Task already queued for this broker".into(),
+        )),
         db::RerunResult::BrokerNotFound => Err(DashboardError::NotFound),
         db::RerunResult::BrokerDisabled => {
             Err(DashboardError::Conflict("Broker is disabled".into()))
