@@ -91,6 +91,50 @@ pub fn derive_db_key_with_params(
     Ok(crypto::key_to_sqlcipher_hex(&key))
 }
 
+/// Re-encrypts the database with a new passphrase using SQLCipher's PRAGMA rekey.
+///
+/// 1. Opens the DB with the old passphrase
+/// 2. Derives a new key from the new passphrase (reusing existing salt)
+/// 3. Issues PRAGMA rekey to re-encrypt in place
+/// 4. Verifies the new key works
+pub fn rekey_db(
+    db_path: &Path,
+    old_passphrase: &str,
+    new_passphrase: &str,
+    salt: &[u8],
+) -> Result<()> {
+    rekey_db_with_params(db_path, old_passphrase, new_passphrase, salt, &crypto::PRODUCTION_PARAMS)
+}
+
+/// Re-encrypts the database with explicit Argon2id parameters (used by tests).
+pub fn rekey_db_with_params(
+    db_path: &Path,
+    old_passphrase: &str,
+    new_passphrase: &str,
+    salt: &[u8],
+    params: &crypto::Argon2Params,
+) -> Result<()> {
+    // Open with old key
+    let conn = open_db_with_params(db_path, old_passphrase, salt, params)?;
+
+    // Derive new key
+    let (new_key, _) = crypto::derive_key_with_params(new_passphrase.as_bytes(), Some(salt), params)?;
+    let new_hex_key = crypto::key_to_sqlcipher_hex(&new_key);
+
+    // Re-encrypt the database
+    conn.pragma_update(None, "rekey", &new_hex_key)
+        .context("Failed to rekey database (PRAGMA rekey failed)")?;
+
+    // Verify the new key works by closing and reopening
+    drop(conn);
+    let verify_conn = open_db_with_params(db_path, new_passphrase, salt, params)?;
+    verify_conn
+        .query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+        .context("Rekey verification failed — database may be corrupted")?;
+
+    Ok(())
+}
+
 /// Creates the database and applies the initial schema.
 pub fn create_db(db_path: &Path, passphrase: &str) -> Result<(Connection, Vec<u8>)> {
     create_db_with_params(db_path, passphrase, &crypto::PRODUCTION_PARAMS)
@@ -599,6 +643,42 @@ pub fn update_run_log(
     )
     .context("Failed to update run log")?;
     Ok(())
+}
+
+/// Row returned by `get_run_summaries`.
+pub struct RunSummaryRow {
+    pub id: i64,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub total_tasks: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub captcha_blocked: i64,
+}
+
+/// Returns recent run summaries, most recent first.
+pub fn get_run_summaries(conn: &Connection, limit: i64) -> Result<Vec<RunSummaryRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, started_at, completed_at, total_tasks, succeeded, failed, captcha_blocked
+         FROM run_log
+         ORDER BY id DESC
+         LIMIT ?1",
+    )?;
+
+    let rows = stmt.query_map([limit], |row| {
+        Ok(RunSummaryRow {
+            id: row.get(0)?,
+            started_at: row.get(1)?,
+            completed_at: row.get(2)?,
+            total_tasks: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            succeeded: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            failed: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+            captcha_blocked: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to query run summaries")
 }
 
 // -- Email rate limiting --
@@ -2173,5 +2253,79 @@ mod tests {
             )
             .unwrap();
         assert_eq!(running_count, 0);
+    }
+
+    #[test]
+    fn test_rekey_db() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_rekey.db");
+
+        // Create DB with old passphrase
+        let (conn, salt) = create_db_with_params(&db_path, "old-pass", &TEST_PARAMS).unwrap();
+        set_config(&conn, "test_key", "test_value").unwrap();
+        drop(conn);
+
+        // Rekey to new passphrase
+        rekey_db_with_params(&db_path, "old-pass", "new-pass", &salt, &TEST_PARAMS).unwrap();
+
+        // Old passphrase should fail
+        let result = open_db_with_params(&db_path, "old-pass", &salt, &TEST_PARAMS);
+        assert!(result.is_err());
+
+        // New passphrase should work and data should be intact
+        let conn = open_db_with_params(&db_path, "new-pass", &salt, &TEST_PARAMS).unwrap();
+        let value = get_config(&conn, "test_key").unwrap();
+        assert_eq!(value.as_deref(), Some("test_value"));
+    }
+
+    #[test]
+    fn test_rekey_db_wrong_old_passphrase() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_rekey_wrong.db");
+
+        let (_conn, salt) = create_db_with_params(&db_path, "correct-pass", &TEST_PARAMS).unwrap();
+        drop(_conn);
+
+        // Wrong old passphrase should fail
+        let result = rekey_db_with_params(&db_path, "wrong-pass", "new-pass", &salt, &TEST_PARAMS);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_run_summaries() {
+        let (conn, _dir) = create_test_db();
+
+        // No runs yet
+        let summaries = get_run_summaries(&conn, 10).unwrap();
+        assert!(summaries.is_empty());
+
+        // Insert a run
+        let run_id = insert_run_log(&conn).unwrap();
+        update_run_log(&conn, run_id, 10, 8, 1, 1).unwrap();
+
+        let summaries = get_run_summaries(&conn, 10).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].total_tasks, 10);
+        assert_eq!(summaries[0].succeeded, 8);
+        assert_eq!(summaries[0].failed, 1);
+        assert_eq!(summaries[0].captcha_blocked, 1);
+        assert!(summaries[0].completed_at.is_some());
+    }
+
+    #[test]
+    fn test_get_run_summaries_limit() {
+        let (conn, _dir) = create_test_db();
+
+        // Insert 5 runs
+        for i in 0..5 {
+            let run_id = insert_run_log(&conn).unwrap();
+            update_run_log(&conn, run_id, i + 1, i, 1, 0).unwrap();
+        }
+
+        // Limit to 3
+        let summaries = get_run_summaries(&conn, 3).unwrap();
+        assert_eq!(summaries.len(), 3);
+        // Most recent first
+        assert_eq!(summaries[0].total_tasks, 5);
     }
 }
