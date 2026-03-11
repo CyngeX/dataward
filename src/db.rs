@@ -2292,6 +2292,26 @@ mod tests {
     }
 
     #[test]
+    fn test_rekey_db_empty() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_rekey_empty.db");
+
+        // Create DB with no user data
+        let (conn, salt) = create_db_with_params(&db_path, "old-pass", &TEST_PARAMS).unwrap();
+        drop(conn);
+
+        // Rekey should succeed even with empty tables
+        rekey_db_with_params(&db_path, "old-pass", "new-pass", &salt, &TEST_PARAMS).unwrap();
+
+        // Verify new passphrase works and schema tables exist
+        let conn = open_db_with_params(&db_path, "new-pass", &salt, &TEST_PARAMS).unwrap();
+        let table_count: i64 = conn
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+            .unwrap();
+        assert!(table_count > 0, "Schema tables should exist after rekey");
+    }
+
+    #[test]
     fn test_get_run_summaries() {
         let (conn, _dir) = create_test_db();
 

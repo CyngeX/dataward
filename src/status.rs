@@ -21,14 +21,17 @@ pub fn run_status(data_dir: &Path) -> Result<()> {
     eprintln!("=== Dataward Status ===");
     eprintln!();
 
+    // Query broker statuses once and share across functions
+    let brokers = db::get_broker_statuses(&conn)?;
+
     // Broker table
-    print_broker_table(&conn)?;
+    print_broker_table(&brokers)?;
 
     // CAPTCHA queue
     print_captcha_queue(&conn)?;
 
     // Stale playbook warnings
-    print_stale_warnings(&conn)?;
+    print_stale_warnings(&brokers)?;
 
     // SMTP delivery stats
     print_smtp_stats(&conn, &config)?;
@@ -43,9 +46,7 @@ pub fn run_status(data_dir: &Path) -> Result<()> {
 }
 
 /// Prints the broker status table.
-fn print_broker_table(conn: &rusqlite::Connection) -> Result<()> {
-    let brokers = db::get_broker_statuses(conn)?;
-
+fn print_broker_table(brokers: &[db::BrokerStatusRow]) -> Result<()> {
     if brokers.is_empty() {
         eprintln!("No brokers configured. Add playbooks and run `dataward init`.");
         eprintln!();
@@ -113,8 +114,7 @@ fn print_captcha_queue(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 /// Prints warnings for stale brokers (last attempt > 30 days ago).
-fn print_stale_warnings(conn: &rusqlite::Connection) -> Result<()> {
-    let brokers = db::get_broker_statuses(conn)?;
+fn print_stale_warnings(brokers: &[db::BrokerStatusRow]) -> Result<()> {
     let mut stale = Vec::new();
 
     for b in &brokers {
@@ -200,9 +200,12 @@ fn format_status(status: &str) -> &str {
 }
 
 /// Truncates a string to max length, adding "..." if needed.
+/// When max < 3 and the string exceeds max, returns dots (e.g. max=0 → "", max=1 → ".", max=2 → "..").
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
+    } else if max < 3 {
+        ".".repeat(max)
     } else {
         let truncated: String = s.chars().take(max - 3).collect();
         format!("{}...", truncated)
@@ -210,10 +213,14 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Formats a datetime string for CLI display (shows date + time, no seconds).
+/// Returns "-" for empty input.
 fn format_datetime(dt: &str) -> String {
+    if dt.is_empty() {
+        return "-".to_string();
+    }
     // Input might be "2026-03-10 14:30:00" or ISO 8601
-    if dt.len() >= 16 {
-        dt[..16].to_string()
+    if dt.chars().count() >= 16 {
+        dt.chars().take(16).collect()
     } else {
         dt.to_string()
     }
@@ -269,6 +276,7 @@ mod tests {
         assert_eq!(format_datetime("2026-03-10 14:30:00"), "2026-03-10 14:30");
         assert_eq!(format_datetime("2026-03-10T14:30:00Z"), "2026-03-10T14:30");
         assert_eq!(format_datetime("short"), "short");
+        assert_eq!(format_datetime(""), "-");
     }
 
     #[test]
@@ -301,5 +309,21 @@ mod tests {
         assert_eq!(truncate("abc", 3), "abc");
         // One over
         assert_eq!(truncate("abcd", 3), "...");
+    }
+
+    #[test]
+    fn test_truncate_small_max() {
+        // max < 3 should not panic (usize underflow guard)
+        assert_eq!(truncate("hello", 0), "");
+        assert_eq!(truncate("hello", 1), ".");
+        assert_eq!(truncate("hello", 2), "..");
+    }
+
+    #[test]
+    fn test_format_datetime_multibyte() {
+        // Multi-byte UTF-8 should not panic on char boundary
+        let dt_with_multibyte = "2026-03-10\u{00A0}14:30:00"; // non-breaking space
+        let result = format_datetime(dt_with_multibyte);
+        assert_eq!(result.chars().count(), 16);
     }
 }

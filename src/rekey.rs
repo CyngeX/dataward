@@ -19,7 +19,7 @@ pub fn run_rekey(data_dir: &Path) -> Result<()> {
     eprintln!();
 
     // Prompt for old passphrase
-    let old_passphrase = crypto::get_passphrase("Current passphrase: ")?;
+    let mut old_passphrase = crypto::get_passphrase("Current passphrase: ")?;
 
     // Verify old passphrase works before asking for new one
     let salt = std::fs::read(data_dir.join(".salt"))
@@ -46,6 +46,7 @@ pub fn run_rekey(data_dir: &Path) -> Result<()> {
 
     if new_passphrase == old_passphrase {
         new_passphrase.zeroize();
+        old_passphrase.zeroize();
         anyhow::bail!("New passphrase is the same as the current one");
     }
 
@@ -57,17 +58,20 @@ pub fn run_rekey(data_dir: &Path) -> Result<()> {
     io::stdin().read_line(&mut confirm_input)?;
     if confirm_input.trim().to_lowercase() != "y" {
         new_passphrase.zeroize();
+        old_passphrase.zeroize();
         eprintln!("Cancelled.");
         return Ok(());
     }
 
-    // Perform rekey
+    // Re-encrypt proof files FIRST (reversible — originals not yet lost)
+    eprintln!("Re-encrypting proof files...");
+    rekey_encrypted_files(data_dir, &old_passphrase, &new_passphrase, &salt)?;
+
+    // Then rekey the database (irreversible — proof files already updated)
     eprintln!("Re-encrypting database...");
     db::rekey_db(&db_path, &old_passphrase, &new_passphrase, &salt)?;
 
-    // Also re-encrypt any .enc files (proof screenshots) with the new key
-    rekey_encrypted_files(data_dir, &old_passphrase, &new_passphrase, &salt)?;
-
+    old_passphrase.zeroize();
     new_passphrase.zeroize();
 
     eprintln!("Database re-encrypted successfully.");
@@ -94,6 +98,8 @@ fn rekey_encrypted_files(
     let (new_key, _) = crypto::derive_key(new_passphrase.as_bytes(), Some(salt))?;
 
     let mut count = 0;
+    let mut errors: Vec<String> = Vec::new();
+
     for entry in std::fs::read_dir(&proofs_dir)
         .with_context(|| format!("Failed to read proofs directory: {}", proofs_dir.display()))?
     {
@@ -104,14 +110,21 @@ fn rekey_encrypted_files(
             match crypto::decrypt_aes256gcm(&old_key, &std::fs::read(&path)?) {
                 Ok(plaintext) => {
                     let encrypted = crypto::encrypt_aes256gcm(&new_key, &plaintext)?;
-                    std::fs::write(&path, &encrypted).with_context(|| {
-                        format!("Failed to write re-encrypted file: {}", path.display())
+                    // Atomic write: write to temp file, then rename
+                    let tmp_path = path.with_extension("enc.tmp");
+                    std::fs::write(&tmp_path, &encrypted).with_context(|| {
+                        format!("Failed to write temp file: {}", tmp_path.display())
                     })?;
+                    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+                        let _ = std::fs::remove_file(&tmp_path);
+                        return Err(e).with_context(|| {
+                            format!("Failed to rename temp file to: {}", path.display())
+                        });
+                    }
                     count += 1;
                 }
                 Err(e) => {
-                    // Log but don't fail — some files might not be encrypted with this key
-                    eprintln!("  Warning: could not re-encrypt {}: {}", path.display(), e);
+                    errors.push(format!("{}: {}", path.display(), e));
                 }
             }
         }
@@ -119,6 +132,14 @@ fn rekey_encrypted_files(
 
     if count > 0 {
         eprintln!("Re-encrypted {} proof file(s).", count);
+    }
+
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "Failed to re-encrypt {} proof file(s):\n  {}",
+            errors.len(),
+            errors.join("\n  ")
+        );
     }
 
     Ok(())
