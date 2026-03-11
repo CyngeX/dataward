@@ -9,7 +9,9 @@ mod email_worker;
 mod init;
 mod logging;
 mod orchestrator;
+mod rekey;
 mod scheduler;
+mod status;
 mod subprocess;
 mod worker_setup;
 
@@ -44,6 +46,8 @@ enum Commands {
     },
     /// Show current status of all brokers and pending tasks
     Status,
+    /// Re-encrypt the database with a new passphrase
+    Rekey,
     /// Playbook management commands
     Playbook {
         #[command(subcommand)]
@@ -100,8 +104,11 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             require_initialized(&data_dir)?;
-            // Phase 6: status implementation
-            eprintln!("Status command not yet implemented (Phase 6)");
+            status::run_status(&data_dir)?;
+        }
+        Commands::Rekey => {
+            require_initialized(&data_dir)?;
+            rekey::run_rekey(&data_dir)?;
         }
         Commands::Playbook { command } => match command {
             PlaybookCommands::Validate { file } => {
