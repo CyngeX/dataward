@@ -60,7 +60,7 @@ fn print_broker_table(brokers: &[db::BrokerStatusRow]) -> Result<()> {
     );
     eprintln!("  {}", "-".repeat(80));
 
-    for b in &brokers {
+    for b in brokers {
         let status =
             b.latest_status
                 .as_deref()
@@ -117,7 +117,7 @@ fn print_captcha_queue(conn: &rusqlite::Connection) -> Result<()> {
 fn print_stale_warnings(brokers: &[db::BrokerStatusRow]) -> Result<()> {
     let mut stale = Vec::new();
 
-    for b in &brokers {
+    for b in brokers {
         if !b.enabled {
             continue;
         }
