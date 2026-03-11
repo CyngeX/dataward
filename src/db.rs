@@ -103,7 +103,13 @@ pub fn rekey_db(
     new_passphrase: &str,
     salt: &[u8],
 ) -> Result<()> {
-    rekey_db_with_params(db_path, old_passphrase, new_passphrase, salt, &crypto::PRODUCTION_PARAMS)
+    rekey_db_with_params(
+        db_path,
+        old_passphrase,
+        new_passphrase,
+        salt,
+        &crypto::PRODUCTION_PARAMS,
+    )
 }
 
 /// Re-encrypts the database with explicit Argon2id parameters (used by tests).
@@ -118,7 +124,8 @@ pub fn rekey_db_with_params(
     let conn = open_db_with_params(db_path, old_passphrase, salt, params)?;
 
     // Derive new key
-    let (new_key, _) = crypto::derive_key_with_params(new_passphrase.as_bytes(), Some(salt), params)?;
+    let (new_key, _) =
+        crypto::derive_key_with_params(new_passphrase.as_bytes(), Some(salt), params)?;
     let new_hex_key = crypto::key_to_sqlcipher_hex(&new_key);
 
     // Re-encrypt the database
