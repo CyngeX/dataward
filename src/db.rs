@@ -653,6 +653,7 @@ pub fn update_run_log(
 }
 
 /// Row returned by `get_run_summaries`.
+#[allow(dead_code)]
 pub struct RunSummaryRow {
     pub id: i64,
     pub started_at: String,
@@ -664,6 +665,7 @@ pub struct RunSummaryRow {
 }
 
 /// Returns recent run summaries, most recent first.
+#[allow(dead_code)]
 pub fn get_run_summaries(conn: &Connection, limit: i64) -> Result<Vec<RunSummaryRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, started_at, completed_at, total_tasks, succeeded, failed, captcha_blocked

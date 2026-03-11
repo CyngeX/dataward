@@ -55,8 +55,8 @@ fn print_broker_table(brokers: &[db::BrokerStatusRow]) -> Result<()> {
 
     eprintln!("Brokers:");
     eprintln!(
-        "  {:<25} {:<10} {:<12} {:<8} {:<10} {}",
-        "Name", "Channel", "Status", "Rate", "Tier", "Next Recheck"
+        "  {:<25} {:<10} {:<12} {:<8} {:<10} Next Recheck",
+        "Name", "Channel", "Status", "Rate", "Tier"
     );
     eprintln!("  {}", "-".repeat(80));
 
