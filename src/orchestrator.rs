@@ -90,7 +90,8 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
     // Runtime writes (mark_task_running, scheduler_tick) may contend with
     // the writer task; busy_timeout ensures SQLite waits rather than returning
     // SQLITE_BUSY immediately.
-    read_conn.busy_timeout(std::time::Duration::from_secs(5))
+    read_conn
+        .busy_timeout(std::time::Duration::from_secs(5))
         .context("Failed to set busy_timeout on read connection")?;
 
     // 4. Initialize logging
@@ -145,7 +146,8 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
                 use sha2::Digest;
                 let token_hash = sha2::Sha256::digest(token.as_bytes());
                 let token_hash_b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::URL_SAFE_NO_PAD, token_hash,
+                    &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                    token_hash,
                 );
 
                 let dashboard_state = dashboard::DashboardState {
@@ -158,7 +160,9 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
                     session_secret: Arc::new(SecretBox::new(Box::new(session_secret.to_vec()))),
                     token_hash_b64,
                     data_dir: data_dir.to_path_buf(),
-                    login_attempts: Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new())),
+                    login_attempts: Arc::new(tokio::sync::Mutex::new(
+                        std::collections::VecDeque::new(),
+                    )),
                 };
 
                 let cancel_dashboard = CancellationToken::new();
@@ -203,9 +207,28 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
     std::fs::create_dir_all(&proof_dir)?;
 
     let result = if once {
-        run_once(&read_conn, &db_tx, &config, &playbooks_dir, &proof_dir, data_dir, &cancel).await
+        run_once(
+            &read_conn,
+            &db_tx,
+            &config,
+            &playbooks_dir,
+            &proof_dir,
+            data_dir,
+            &cancel,
+        )
+        .await
     } else {
-        run_daemon(&read_conn, &db_tx, &config, &playbooks_dir, &proof_dir, data_dir, &cancel, scheduler_notify_rx).await
+        run_daemon(
+            &read_conn,
+            &db_tx,
+            &config,
+            &playbooks_dir,
+            &proof_dir,
+            data_dir,
+            &cancel,
+            scheduler_notify_rx,
+        )
+        .await
     };
 
     // 9. Graceful shutdown
@@ -230,11 +253,16 @@ pub async fn run(data_dir: &Path, once: bool) -> Result<()> {
     match tokio::time::timeout(
         std::time::Duration::from_secs(SHUTDOWN_TIMEOUT_SECS),
         writer_handle,
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(Ok(()))) => tracing::info!("DB writer shut down cleanly"),
         Ok(Ok(Err(e))) => tracing::warn!("DB writer error during shutdown: {}", e),
         Ok(Err(e)) => tracing::warn!("DB writer task panicked: {}", e),
-        Err(_) => tracing::warn!("DB writer shutdown timed out after {}s", SHUTDOWN_TIMEOUT_SECS),
+        Err(_) => tracing::warn!(
+            "DB writer shutdown timed out after {}s",
+            SHUTDOWN_TIMEOUT_SECS
+        ),
     }
 
     // Release PID lock (implicit on drop, but be explicit)
@@ -256,17 +284,27 @@ async fn run_once(
 ) -> Result<()> {
     let tick = scheduler::scheduler_tick(read_conn, playbooks_dir)?;
     let summary = dispatch_tasks(
-        read_conn, db_tx, config, &tick.due_tasks, proof_dir, data_dir, cancel,
-    ).await?;
+        read_conn,
+        db_tx,
+        config,
+        &tick.due_tasks,
+        proof_dir,
+        data_dir,
+        cancel,
+    )
+    .await?;
 
     // Update run log (CONS-R2-019: log send failures)
-    if let Err(e) = db_tx.send(db::DbWriteMessage::UpdateRunLog {
-        run_id: tick.run_id,
-        total: summary.total,
-        succeeded: summary.succeeded,
-        failed: summary.failed,
-        captcha_blocked: summary.captcha_blocked,
-    }).await {
+    if let Err(e) = db_tx
+        .send(db::DbWriteMessage::UpdateRunLog {
+            run_id: tick.run_id,
+            total: summary.total,
+            succeeded: summary.succeeded,
+            failed: summary.failed,
+            captcha_blocked: summary.captcha_blocked,
+        })
+        .await
+    {
         tracing::error!(run_id = tick.run_id, "Failed to send run log update: {}", e);
     }
 
@@ -282,6 +320,7 @@ async fn run_once(
 }
 
 /// Runs the scheduler in daemon mode with periodic ticks.
+#[allow(clippy::too_many_arguments)]
 async fn run_daemon(
     read_conn: &rusqlite::Connection,
     db_tx: &mpsc::Sender<db::DbWriteMessage>,
@@ -405,8 +444,10 @@ async fn dispatch_tasks(
     data_dir: &Path,
     cancel: &CancellationToken,
 ) -> Result<RunSummary> {
-    let mut summary = RunSummary::default();
-    summary.total = due_tasks.len() as i32;
+    let mut summary = RunSummary {
+        total: due_tasks.len() as i32,
+        ..RunSummary::default()
+    };
 
     if due_tasks.is_empty() {
         return Ok(summary);
@@ -421,14 +462,18 @@ async fn dispatch_tasks(
     let api_client = api_worker::create_api_client()?;
 
     // CONS-R3-003: Cache loaded playbooks per-tick (keyed by parent directory)
-    let mut playbook_cache: std::collections::HashMap<PathBuf, Vec<broker_registry::Playbook>> = std::collections::HashMap::new();
+    let mut playbook_cache: std::collections::HashMap<PathBuf, Vec<broker_registry::Playbook>> =
+        std::collections::HashMap::new();
 
     for task in due_tasks {
         if cancel.is_cancelled() {
             tracing::info!("Shutdown requested, stopping task dispatch");
             // CONS-R3-013: Subtract already-counted items including skipped
             summary.skipped += (due_tasks.len() as i32)
-                - summary.succeeded - summary.failed - summary.captcha_blocked - summary.skipped;
+                - summary.succeeded
+                - summary.failed
+                - summary.captcha_blocked
+                - summary.skipped;
             break;
         }
 
@@ -460,7 +505,10 @@ async fn dispatch_tasks(
         match db::mark_task_running(read_conn, task.id) {
             Ok(true) => {} // claimed successfully
             Ok(false) => {
-                tracing::warn!(task_id = task.id, "Task already claimed by another tick, skipping");
+                tracing::warn!(
+                    task_id = task.id,
+                    "Task already claimed by another tick, skipping"
+                );
                 summary.skipped += 1;
                 continue;
             }
@@ -485,20 +533,29 @@ async fn dispatch_tasks(
                 let playbook_parent = match PathBuf::from(&task.playbook_path).parent() {
                     Some(p) => p.to_path_buf(),
                     None => {
-                        report_failure(db_tx, task, "playbook_error",
+                        report_failure(
+                            db_tx,
+                            task,
+                            "playbook_error",
                             &format!("Invalid playbook path (no parent): {}", task.playbook_path),
-                            false).await;
+                            false,
+                        )
+                        .await;
                         summary.failed += 1;
                         continue;
                     }
                 };
                 // CONS-R3-003: Use playbook cache instead of reloading from disk per task
                 let playbook = match get_cached_playbook(
-                    &mut playbook_cache, &playbook_parent, &task.broker_id, task.id,
+                    &mut playbook_cache,
+                    &playbook_parent,
+                    &task.broker_id,
+                    task.id,
                 ) {
                     Ok(Some(p)) => p,
                     Ok(None) => {
-                        report_failure(db_tx, task, "playbook_error", "Playbook not found", false).await;
+                        report_failure(db_tx, task, "playbook_error", "Playbook not found", false)
+                            .await;
                         summary.failed += 1;
                         continue;
                     }
@@ -510,14 +567,16 @@ async fn dispatch_tasks(
                 };
 
                 // CONS-R3-003: Validate required PII fields from cached profile data
-                let user_data = match validate_fields_from_cache(&all_profile, &playbook.required_fields) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        report_failure(db_tx, task, "playbook_error", &e.to_string(), false).await;
-                        summary.failed += 1;
-                        continue;
-                    }
-                };
+                let user_data =
+                    match validate_fields_from_cache(&all_profile, &playbook.required_fields) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            report_failure(db_tx, task, "playbook_error", &e.to_string(), false)
+                                .await;
+                            summary.failed += 1;
+                            continue;
+                        }
+                    };
 
                 // Spawn subprocess if not already running
                 if subprocess_mgr.is_none() {
@@ -525,7 +584,8 @@ async fn dispatch_tasks(
                         Ok(mgr) => subprocess_mgr = Some(mgr),
                         Err(e) => {
                             tracing::error!("Failed to spawn worker subprocess: {}", e);
-                            report_failure(db_tx, task, "playbook_error", &e.to_string(), true).await;
+                            report_failure(db_tx, task, "playbook_error", &e.to_string(), true)
+                                .await;
                             summary.failed += 1;
                             continue;
                         }
@@ -548,14 +608,20 @@ async fn dispatch_tasks(
                 let result = tokio::time::timeout(
                     std::time::Duration::from_millis(BROWSER_TIMEOUT_MS + 5000), // 5s grace
                     mgr.execute_task(&input, cancel),
-                ).await;
+                )
+                .await;
 
                 match result {
                     Ok(Ok(worker_result)) => {
                         process_worker_result(
-                            db_tx, task, &worker_result, playbook.broker.recheck_days,
-                            playbook.max_retries as i32, &mut summary,
-                        ).await;
+                            db_tx,
+                            task,
+                            &worker_result,
+                            playbook.broker.recheck_days,
+                            playbook.max_retries as i32,
+                            &mut summary,
+                        )
+                        .await;
                     }
                     Ok(Err(e)) => {
                         let msg = e.to_string();
@@ -572,7 +638,8 @@ async fn dispatch_tasks(
                     Err(_) => {
                         // Outer timeout fired
                         tracing::error!(task_id = task.id, "Task timed out (outer)");
-                        report_failure(db_tx, task, "timeout", "Task exceeded outer timeout", true).await;
+                        report_failure(db_tx, task, "timeout", "Task exceeded outer timeout", true)
+                            .await;
                         summary.failed += 1;
                         // Kill and respawn worker
                         subprocess_mgr = None;
@@ -581,37 +648,38 @@ async fn dispatch_tasks(
             }
             "email" => {
                 // Load playbook for required_fields (CONS-R3-003: cached)
-                let playbook = load_playbook_for_broker(
-                    &PathBuf::from(&task.playbook_path), &task.broker_id,
-                );
+                let playbook =
+                    load_playbook_for_broker(&PathBuf::from(&task.playbook_path), &task.broker_id);
 
-                let (required_fields, broker_name, broker_email, recheck_days, max_retries) = match playbook {
-                    Ok(p) => {
-                        // CONS-001: Use broker.url as the email address for email-channel brokers.
-                        let email = p.broker.url.clone();
-                        if email.is_empty() || !email.contains('@') {
-                            report_failure(
+                let (required_fields, broker_name, broker_email, recheck_days, max_retries) =
+                    match playbook {
+                        Ok(p) => {
+                            // CONS-001: Use broker.url as the email address for email-channel brokers.
+                            let email = p.broker.url.clone();
+                            if email.is_empty() || !email.contains('@') {
+                                report_failure(
                                 db_tx, task, "playbook_error",
                                 &format!("Broker '{}' has no valid email address in playbook (url field: '{}')", p.broker.id, email),
                                 false,
                             ).await;
+                                summary.failed += 1;
+                                continue;
+                            }
+                            (
+                                p.required_fields.clone(),
+                                p.broker.name.clone(),
+                                email,
+                                p.broker.recheck_days,
+                                p.max_retries as i32,
+                            )
+                        }
+                        Err(e) => {
+                            report_failure(db_tx, task, "playbook_error", &e.to_string(), false)
+                                .await;
                             summary.failed += 1;
                             continue;
                         }
-                        (
-                            p.required_fields.clone(),
-                            p.broker.name.clone(),
-                            email,
-                            p.broker.recheck_days,
-                            p.max_retries as i32,
-                        )
-                    }
-                    Err(e) => {
-                        report_failure(db_tx, task, "playbook_error", &e.to_string(), false).await;
-                        summary.failed += 1;
-                        continue;
-                    }
-                };
+                    };
 
                 // CONS-R3-003: Validate from cached profile data
                 let user_data = match validate_fields_from_cache(&all_profile, &required_fields) {
@@ -633,18 +701,22 @@ async fn dispatch_tasks(
                         &user_data,
                         config.email.daily_limit,
                     ),
-                ).await;
+                )
+                .await;
 
                 match email_result {
                     Ok(Ok(result)) => {
                         if result.success {
-                            if let Err(e) = db_tx.send(db::DbWriteMessage::CompleteTaskSuccess {
-                                task_id: task.id,
-                                duration_ms: result.duration_ms,
-                                proof_path: None,
-                                confirmation_text: result.confirmation_text,
-                                recheck_days,
-                            }).await {
+                            if let Err(e) = db_tx
+                                .send(db::DbWriteMessage::CompleteTaskSuccess {
+                                    task_id: task.id,
+                                    duration_ms: result.duration_ms,
+                                    proof_path: None,
+                                    confirmation_text: result.confirmation_text,
+                                    recheck_days,
+                                })
+                                .await
+                            {
                                 tracing::error!(task_id = task.id, "DB writer send failed: {}", e);
                             }
                             summary.succeeded += 1;
@@ -652,30 +724,38 @@ async fn dispatch_tasks(
                             // CONS-R3-007: Rate-limited tasks reset to pending without
                             // burning a retry attempt. Rate limiting is transient infra,
                             // not a task-level failure.
-                            if let Err(e) = db_tx.send(db::DbWriteMessage::UpdateTask {
-                                task_id: task.id,
-                                status: "pending".to_string(),
-                                error_code: Some("rate_limited".to_string()),
-                                error_message: result.error_message,
-                                error_retryable: Some(true),
-                                duration_ms: Some(result.duration_ms),
-                                proof_path: None,
-                                confirmation_text: None,
-                                // CONS-R4-001: Delay recheck by 1 day to avoid tight re-dispatch loop
-                                delay_recheck_days: Some(1),
-                            }).await {
+                            if let Err(e) = db_tx
+                                .send(db::DbWriteMessage::UpdateTask {
+                                    task_id: task.id,
+                                    status: "pending".to_string(),
+                                    error_code: Some("rate_limited".to_string()),
+                                    error_message: result.error_message,
+                                    error_retryable: Some(true),
+                                    duration_ms: Some(result.duration_ms),
+                                    proof_path: None,
+                                    confirmation_text: None,
+                                    // CONS-R4-001: Delay recheck by 1 day to avoid tight re-dispatch loop
+                                    delay_recheck_days: Some(1),
+                                })
+                                .await
+                            {
                                 tracing::error!(task_id = task.id, "DB writer send failed: {}", e);
                             }
                             summary.skipped += 1;
                         } else {
-                            if let Err(e) = db_tx.send(db::DbWriteMessage::FailTaskWithRetry {
-                                task_id: task.id,
-                                error_code: result.error_code.unwrap_or_else(|| "playbook_error".into()),
-                                error_message: result.error_message.unwrap_or_default(),
-                                error_retryable: result.error_retryable,
-                                duration_ms: result.duration_ms,
-                                max_retries,
-                            }).await {
+                            if let Err(e) = db_tx
+                                .send(db::DbWriteMessage::FailTaskWithRetry {
+                                    task_id: task.id,
+                                    error_code: result
+                                        .error_code
+                                        .unwrap_or_else(|| "playbook_error".into()),
+                                    error_message: result.error_message.unwrap_or_default(),
+                                    error_retryable: result.error_retryable,
+                                    duration_ms: result.duration_ms,
+                                    max_retries,
+                                })
+                                .await
+                            {
                                 tracing::error!(task_id = task.id, "DB writer send failed: {}", e);
                             }
                             summary.failed += 1;
@@ -692,9 +772,8 @@ async fn dispatch_tasks(
                 }
             }
             "api" => {
-                let playbook = load_playbook_for_broker(
-                    &PathBuf::from(&task.playbook_path), &task.broker_id,
-                );
+                let playbook =
+                    load_playbook_for_broker(&PathBuf::from(&task.playbook_path), &task.broker_id);
 
                 let (api_url, required_fields, recheck_days, max_retries) = match playbook {
                     Ok(p) => (
@@ -728,30 +807,39 @@ async fn dispatch_tasks(
                         &user_data,
                         &task.broker_id,
                     ),
-                ).await;
+                )
+                .await;
 
                 match api_result {
                     Ok(result) => {
                         if result.success {
-                            if let Err(e) = db_tx.send(db::DbWriteMessage::CompleteTaskSuccess {
-                                task_id: task.id,
-                                duration_ms: result.duration_ms,
-                                proof_path: None,
-                                confirmation_text: result.confirmation_text,
-                                recheck_days,
-                            }).await {
+                            if let Err(e) = db_tx
+                                .send(db::DbWriteMessage::CompleteTaskSuccess {
+                                    task_id: task.id,
+                                    duration_ms: result.duration_ms,
+                                    proof_path: None,
+                                    confirmation_text: result.confirmation_text,
+                                    recheck_days,
+                                })
+                                .await
+                            {
                                 tracing::error!(task_id = task.id, "DB writer send failed: {}", e);
                             }
                             summary.succeeded += 1;
                         } else {
-                            if let Err(e) = db_tx.send(db::DbWriteMessage::FailTaskWithRetry {
-                                task_id: task.id,
-                                error_code: result.error_code.unwrap_or_else(|| "playbook_error".into()),
-                                error_message: result.error_message.unwrap_or_default(),
-                                error_retryable: result.error_retryable,
-                                duration_ms: result.duration_ms,
-                                max_retries,
-                            }).await {
+                            if let Err(e) = db_tx
+                                .send(db::DbWriteMessage::FailTaskWithRetry {
+                                    task_id: task.id,
+                                    error_code: result
+                                        .error_code
+                                        .unwrap_or_else(|| "playbook_error".into()),
+                                    error_message: result.error_message.unwrap_or_default(),
+                                    error_retryable: result.error_retryable,
+                                    duration_ms: result.duration_ms,
+                                    max_retries,
+                                })
+                                .await
+                            {
                                 tracing::error!(task_id = task.id, "DB writer send failed: {}", e);
                             }
                             summary.failed += 1;
@@ -764,7 +852,7 @@ async fn dispatch_tasks(
                 }
             }
             // CONS-R3-001: manual_only and unknown channels handled before mark_task_running
-            _ => unreachable!("non-dispatchable channels filtered before mark_task_running")
+            _ => unreachable!("non-dispatchable channels filtered before mark_task_running"),
         }
     }
 
@@ -789,41 +877,53 @@ async fn process_worker_result(
 ) {
     match result.status.as_str() {
         "success" => {
-            let proof_path = result.proof.as_ref().and_then(|p| p.screenshot_path.clone());
+            let proof_path = result
+                .proof
+                .as_ref()
+                .and_then(|p| p.screenshot_path.clone());
             let confirmation_text = result.proof.as_ref().map(|p| p.confirmation_text.clone());
-            if let Err(e) = db_tx.send(db::DbWriteMessage::CompleteTaskSuccess {
-                task_id: task.id,
-                duration_ms: result.duration_ms,
-                proof_path,
-                confirmation_text,
-                recheck_days,
-            }).await {
+            if let Err(e) = db_tx
+                .send(db::DbWriteMessage::CompleteTaskSuccess {
+                    task_id: task.id,
+                    duration_ms: result.duration_ms,
+                    proof_path,
+                    confirmation_text,
+                    recheck_days,
+                })
+                .await
+            {
                 tracing::error!(task_id = %task.id, "DB writer send failed: {}", e);
             }
             summary.succeeded += 1;
         }
         "captcha_blocked" => {
-            if let Err(e) = db_tx.send(db::DbWriteMessage::FailTaskWithRetry {
-                task_id: task.id,
-                error_code: "captcha_blocked".to_string(),
-                error_message: result.error_message.clone().unwrap_or_default(),
-                error_retryable: true,
-                duration_ms: result.duration_ms,
-                max_retries,
-            }).await {
+            if let Err(e) = db_tx
+                .send(db::DbWriteMessage::FailTaskWithRetry {
+                    task_id: task.id,
+                    error_code: "captcha_blocked".to_string(),
+                    error_message: result.error_message.clone().unwrap_or_default(),
+                    error_retryable: true,
+                    duration_ms: result.duration_ms,
+                    max_retries,
+                })
+                .await
+            {
                 tracing::error!(task_id = %task.id, "DB writer send failed: {}", e);
             }
             summary.captcha_blocked += 1;
         }
         "timeout" => {
-            if let Err(e) = db_tx.send(db::DbWriteMessage::FailTaskWithRetry {
-                task_id: task.id,
-                error_code: "timeout".to_string(),
-                error_message: result.error_message.clone().unwrap_or_default(),
-                error_retryable: true,
-                duration_ms: result.duration_ms,
-                max_retries,
-            }).await {
+            if let Err(e) = db_tx
+                .send(db::DbWriteMessage::FailTaskWithRetry {
+                    task_id: task.id,
+                    error_code: "timeout".to_string(),
+                    error_message: result.error_message.clone().unwrap_or_default(),
+                    error_retryable: true,
+                    duration_ms: result.duration_ms,
+                    max_retries,
+                })
+                .await
+            {
                 tracing::error!(task_id = %task.id, "DB writer send failed: {}", e);
             }
             summary.failed += 1;
@@ -834,14 +934,20 @@ async fn process_worker_result(
                 result.error_code.as_deref(),
                 Some("selector_not_found") | Some("page_structure_changed")
             );
-            if let Err(e) = db_tx.send(db::DbWriteMessage::FailTaskWithRetry {
-                task_id: task.id,
-                error_code: result.error_code.clone().unwrap_or_else(|| "playbook_error".to_string()),
-                error_message: result.error_message.clone().unwrap_or_default(),
-                error_retryable,
-                duration_ms: result.duration_ms,
-                max_retries,
-            }).await {
+            if let Err(e) = db_tx
+                .send(db::DbWriteMessage::FailTaskWithRetry {
+                    task_id: task.id,
+                    error_code: result
+                        .error_code
+                        .clone()
+                        .unwrap_or_else(|| "playbook_error".to_string()),
+                    error_message: result.error_message.clone().unwrap_or_default(),
+                    error_retryable,
+                    duration_ms: result.duration_ms,
+                    max_retries,
+                })
+                .await
+            {
                 tracing::error!(task_id = %task.id, "DB writer send failed: {}", e);
             }
             summary.failed += 1;
@@ -857,15 +963,22 @@ async fn report_failure(
     error_message: &str,
     retryable: bool,
 ) {
-    if let Err(e) = db_tx.send(db::DbWriteMessage::FailTaskWithRetry {
-        task_id: task.id,
-        error_code: error_code.to_string(),
-        error_message: error_message.to_string(),
-        error_retryable: retryable,
-        duration_ms: 0,
-        max_retries: task.max_retries,
-    }).await {
-        tracing::error!(task_id = task.id, "Failed to send failure to DB writer: {}", e);
+    if let Err(e) = db_tx
+        .send(db::DbWriteMessage::FailTaskWithRetry {
+            task_id: task.id,
+            error_code: error_code.to_string(),
+            error_message: error_message.to_string(),
+            error_retryable: retryable,
+            duration_ms: 0,
+            max_retries: task.max_retries,
+        })
+        .await
+    {
+        tracing::error!(
+            task_id = task.id,
+            "Failed to send failure to DB writer: {}",
+            e
+        );
     }
 }
 
@@ -877,15 +990,24 @@ fn load_playbook_for_broker(
     // The playbook_path in the DB is the full path to the YAML file.
     // We need to find its parent directory structure (official/community/local)
     // to load via the standard playbook loader.
-    let parent = playbook_path.parent()
+    let parent = playbook_path
+        .parent()
         .ok_or_else(|| anyhow::anyhow!("Invalid playbook path: {}", playbook_path.display()))?;
-    let grandparent = parent.parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid playbook directory structure: {}", parent.display()))?;
+    let grandparent = parent.parent().ok_or_else(|| {
+        anyhow::anyhow!("Invalid playbook directory structure: {}", parent.display())
+    })?;
 
     let playbooks = broker_registry::load_playbooks(grandparent)?;
-    playbooks.into_iter()
+    playbooks
+        .into_iter()
         .find(|p| p.broker.id == broker_id)
-        .ok_or_else(|| anyhow::anyhow!("Playbook for broker '{}' not found in {}", broker_id, grandparent.display()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Playbook for broker '{}' not found in {}",
+                broker_id,
+                grandparent.display()
+            )
+        })
 }
 
 /// Looks up a playbook from the per-tick cache, loading from disk on first access (CONS-R3-003).
@@ -915,7 +1037,9 @@ fn get_cached_playbook(
         }
     }
 
-    let playbooks = cache.get(playbook_parent).expect("cache key was just inserted");
+    let playbooks = cache
+        .get(playbook_parent)
+        .expect("cache key was just inserted");
     Ok(playbooks.iter().find(|p| p.broker.id == broker_id).cloned())
 }
 
@@ -954,7 +1078,9 @@ fn validate_fields_from_cache(
         if value.len() > MAX_PII_FIELD_BYTES {
             anyhow::bail!(
                 "PII field '{}' exceeds {} byte limit ({} bytes)",
-                key, MAX_PII_FIELD_BYTES, value.len()
+                key,
+                MAX_PII_FIELD_BYTES,
+                value.len()
             );
         }
     }
@@ -974,6 +1100,7 @@ fn acquire_pid_lock(data_dir: &Path) -> Result<PidLock> {
     // CONS-R2-020: Open WITHOUT truncate, lock first, then truncate and write
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&pid_path)
@@ -995,7 +1122,10 @@ fn acquire_pid_lock(data_dir: &Path) -> Result<PidLock> {
             file.set_len(0)?;
             write!(file, "{}", std::process::id())?;
             file.sync_all()?;
-            Ok(PidLock { _file: file, path: pid_path })
+            Ok(PidLock {
+                _file: file,
+                path: pid_path,
+            })
         }
         Err(_e) => {
             // Read existing PID for error message
@@ -1029,10 +1159,10 @@ impl Drop for PidLock {
 async fn wait_for_shutdown_signal() -> Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
 
-    let mut sigterm = signal(SignalKind::terminate())
-        .context("Failed to register SIGTERM handler")?;
-    let mut sigint = signal(SignalKind::interrupt())
-        .context("Failed to register SIGINT handler")?;
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("Failed to register SIGTERM handler")?;
+    let mut sigint =
+        signal(SignalKind::interrupt()).context("Failed to register SIGINT handler")?;
 
     tokio::select! {
         _ = sigterm.recv() => {
@@ -1048,7 +1178,8 @@ async fn wait_for_shutdown_signal() -> Result<()> {
 
 #[cfg(not(unix))]
 async fn wait_for_shutdown_signal() -> Result<()> {
-    tokio::signal::ctrl_c().await
+    tokio::signal::ctrl_c()
+        .await
         .context("Failed to listen for Ctrl+C")?;
     Ok(())
 }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 /// Application configuration loaded from config.toml.
 ///
 /// Contains ONLY non-sensitive settings. Credentials are in SQLCipher DB.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// General settings
@@ -70,6 +70,7 @@ pub struct DashboardConfig {
 
     /// Whether to start the dashboard on `dataward run`
     #[serde(default = "default_true")]
+    #[allow(dead_code)]
     pub enabled: bool,
 }
 
@@ -133,18 +134,6 @@ fn default_true() -> bool {
     true
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            scheduler: SchedulerConfig::default(),
-            dashboard: DashboardConfig::default(),
-            email: EmailConfig::default(),
-            logging: LoggingConfig::default(),
-        }
-    }
-}
-
 impl Config {
     /// Loads config from the given path. Returns default config if file doesn't exist.
     pub fn load(data_dir: &Path) -> Result<Self> {
@@ -166,7 +155,10 @@ impl Config {
     /// Validates config values are within acceptable ranges.
     fn validate(&self) -> Result<()> {
         if self.general.concurrency == 0 || self.general.concurrency > 3 {
-            anyhow::bail!("general.concurrency must be between 1 and 3 (got {})", self.general.concurrency);
+            anyhow::bail!(
+                "general.concurrency must be between 1 and 3 (got {})",
+                self.general.concurrency
+            );
         }
         if self.scheduler.interval_hours == 0 {
             anyhow::bail!("scheduler.interval_hours must be at least 1");

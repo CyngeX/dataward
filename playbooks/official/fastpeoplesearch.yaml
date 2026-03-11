@@ -1,0 +1,53 @@
+broker:
+  id: fastpeoplesearch
+  name: FastPeopleSearch
+  url: https://www.fastpeoplesearch.com
+  category: people_search
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains:
+    - www.fastpeoplesearch.com
+    - fastpeoplesearch.com
+
+required_fields:
+  - first_name
+  - last_name
+  - city
+  - state
+
+steps:
+  # Navigate to the removal page
+  - navigate: "https://www.fastpeoplesearch.com/removal"
+
+  # Wait for page to load
+  - wait: { seconds: 2 }
+
+  # Fill in the name search fields
+  - fill: { selector: "input#firstName", field: "first_name" }
+  - fill: { selector: "input#lastName", field: "last_name" }
+  - fill: { selector: "input#city", field: "city" }
+  - fill: { selector: "input#state", field: "state" }
+
+  # Submit the record search
+  - click: { selector: "button#searchButton" }
+
+  # Wait for search results
+  - wait: { seconds: 3 }
+
+  # Click the remove link for the first matching record
+  - click: { selector: "a.remove-record" }
+
+  # Wait for removal page
+  - wait: { seconds: 2 }
+
+  # Confirm the removal request
+  - click: { selector: "button#confirmRemoval" }
+
+  # Wait for processing
+  - wait: { seconds: 2 }
+
+  # Capture proof of the removal
+  - screenshot: { name: "removal_confirmation" }
+
+on_error: retry
+max_retries: 3

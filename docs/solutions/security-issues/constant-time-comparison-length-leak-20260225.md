@@ -72,7 +72,12 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 - **Alternative:** HMAC-based comparison (compute HMAC of both inputs with a shared key, compare MACs). This is what `hmac.verify()` does internally.
 - The `subtle` crate's `ct_eq` is only safe for fixed-length comparisons (e.g., two `[u8; 32]` arrays). For variable-length, always normalize first.
 
+## Recurrence: Phase 5 — verify_sha256 length check (2026-03-01)
+
+Hit a variant in `src/download.rs::verify_sha256`. After `hex::decode` both the actual and expected hashes, an explicit `if actual_bytes.len() != expected_bytes.len()` check was added before `ct_eq`. This early-exit on length mismatch is itself a timing oracle — it reveals whether the attacker's hash is the right length without comparing the content. The fix: remove the length check entirely. `ct_eq` on differing-length slices returns 0 (unequal), and `hex::decode` failures surface naturally for invalid input. The lesson: **any branch before `ct_eq` that depends on the secret defeats the purpose**.
+
 ## Related Issues
 
 - CSRF double-submit cookie pattern relies on this for token comparison
 - Session cookie HMAC signature verification uses this for the token hash check
+- #5 (Phase 5: Distribution + Initial Broker Playbooks) — verify_sha256 timing oracle fix

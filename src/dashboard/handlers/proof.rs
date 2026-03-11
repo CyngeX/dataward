@@ -25,8 +25,9 @@ pub async fn serve_proof(
             let conn = open_dashboard_db(&state_clone)?;
             db::get_task_proof_path(&conn, task_id)
                 .map_err(|e| DashboardError::Internal(format!("Query error: {}", e)))
-        }).await
-            .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))??
+        })
+        .await
+        .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))??
     };
 
     let relative_path = proof_path.ok_or(DashboardError::NotFound)?;
@@ -46,10 +47,10 @@ pub async fn serve_proof(
             let full_path = data_dir.join(&relative_path);
 
             // Canonicalize and verify prefix (canonicalize resolves symlinks)
-            let canonical_data_dir = std::fs::canonicalize(&data_dir)
-                .map_err(|_| DashboardError::NotFound)?;
-            let canonical_proof = std::fs::canonicalize(&full_path)
-                .map_err(|_| DashboardError::NotFound)?;
+            let canonical_data_dir =
+                std::fs::canonicalize(&data_dir).map_err(|_| DashboardError::NotFound)?;
+            let canonical_proof =
+                std::fs::canonicalize(&full_path).map_err(|_| DashboardError::NotFound)?;
 
             if !canonical_proof.starts_with(&canonical_data_dir) {
                 tracing::warn!(
@@ -67,8 +68,8 @@ pub async fn serve_proof(
             }
 
             // Get file size (canonicalize already resolved symlinks, use regular metadata)
-            let metadata = std::fs::metadata(&canonical_proof)
-                .map_err(|_| DashboardError::NotFound)?;
+            let metadata =
+                std::fs::metadata(&canonical_proof).map_err(|_| DashboardError::NotFound)?;
 
             if metadata.len() > MAX_PROOF_FILE_SIZE {
                 tracing::warn!(size = metadata.len(), "Proof file exceeds size limit");
@@ -76,8 +77,9 @@ pub async fn serve_proof(
             }
 
             Ok((canonical_proof, metadata.len()))
-        }).await
-            .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))??
+        })
+        .await
+        .map_err(|e| DashboardError::Internal(format!("Task join error: {}", e)))??
     };
 
     let _ = file_size; // Used for validation above; binding kept for clarity
@@ -91,18 +93,18 @@ pub async fn serve_proof(
         tokio::task::spawn_blocking(move || {
             crypto::decrypt_file_to_memory(master_key.expose_secret(), &proof_path_owned)
         }),
-    ).await;
+    )
+    .await;
 
     match decrypt_result {
-        Ok(Ok(Ok(decrypted))) => {
-            Ok((
-                [
-                    (header::CONTENT_TYPE, "image/png"),
-                    (header::CACHE_CONTROL, "no-store"),
-                ],
-                decrypted,
-            ).into_response())
-        }
+        Ok(Ok(Ok(decrypted))) => Ok((
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            decrypted,
+        )
+            .into_response()),
         Ok(Ok(Err(e))) => {
             tracing::error!(task_id, "Proof decryption failed: {}", e);
             Err(DashboardError::NotFound) // Generic error — don't reveal decryption failure

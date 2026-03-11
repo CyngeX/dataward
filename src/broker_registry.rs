@@ -30,6 +30,7 @@ const TRUST_TIERS: &[(&str, &str)] = &[
 
 /// A parsed and validated playbook.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Playbook {
     pub broker: BrokerDefinition,
     pub required_fields: Vec<String>,
@@ -112,6 +113,7 @@ pub struct ClickParams {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 pub struct SelectParams {
     pub selector: String,
     #[serde(alias = "value_or_field")]
@@ -132,6 +134,7 @@ pub struct ScreenshotParams {
 
 /// Validated playbook step.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum PlaybookStep {
     Navigate(String),
     Fill(FillParams),
@@ -143,6 +146,14 @@ pub enum PlaybookStep {
 
 /// Loads and validates all playbooks from the playbooks directory.
 ///
+/// Validates a single playbook file and returns it if valid.
+///
+/// This is the public entry point for the `dataward playbook validate` CLI command.
+/// The trust tier defaults to "local" for standalone validation.
+pub fn validate_playbook_file(path: &Path) -> Result<Playbook> {
+    load_and_validate_playbook(path, "local")
+}
+
 /// Returns validated playbooks grouped by trust tier. Invalid playbooks
 /// are logged as warnings but don't block loading of valid ones.
 pub fn load_playbooks(playbooks_dir: &Path) -> Result<Vec<Playbook>> {
@@ -155,8 +166,9 @@ pub fn load_playbooks(playbooks_dir: &Path) -> Result<Vec<Playbook>> {
             continue;
         }
 
-        let entries = std::fs::read_dir(&tier_dir)
-            .with_context(|| format!("Failed to read playbook directory: {}", tier_dir.display()))?;
+        let entries = std::fs::read_dir(&tier_dir).with_context(|| {
+            format!("Failed to read playbook directory: {}", tier_dir.display())
+        })?;
 
         for entry in entries {
             let entry = entry?;
@@ -235,7 +247,12 @@ fn load_and_validate_playbook(path: &Path, trust_tier: &str) -> Result<Playbook>
 
     // Validate and convert steps
     let required_fields: HashSet<&str> = raw.required_fields.iter().map(|s| s.as_str()).collect();
-    let allowed_domains: HashSet<&str> = raw.broker.allowed_domains.iter().map(|s| s.as_str()).collect();
+    let allowed_domains: HashSet<&str> = raw
+        .broker
+        .allowed_domains
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
 
     let mut steps = Vec::with_capacity(raw.steps.len());
     for (i, raw_step) in raw.steps.iter().enumerate() {
@@ -288,8 +305,8 @@ fn validate_broker_metadata(broker: &BrokerDefinition) -> Result<()> {
     }
 
     // Validate the broker URL
-    let url = Url::parse(&broker.url)
-        .with_context(|| format!("Invalid broker URL: {}", broker.url))?;
+    let url =
+        Url::parse(&broker.url).with_context(|| format!("Invalid broker URL: {}", broker.url))?;
     if url.scheme() != "https" {
         anyhow::bail!("Broker URL must use HTTPS: {}", broker.url);
     }
@@ -321,7 +338,10 @@ fn validate_step(
         anyhow::bail!("Step {} has no action type", index);
     }
     if action_count > 1 {
-        anyhow::bail!("Step {} has multiple action types (must have exactly 1)", index);
+        anyhow::bail!(
+            "Step {} has multiple action types (must have exactly 1)",
+            index
+        );
     }
 
     if let Some(url_str) = &raw.navigate {
@@ -359,7 +379,11 @@ fn validate_step(
     }
 
     if let Some(wait) = &raw.wait {
-        if wait.seconds.is_nan() || wait.seconds.is_infinite() || wait.seconds <= 0.0 || wait.seconds > 30.0 {
+        if wait.seconds.is_nan()
+            || wait.seconds.is_infinite()
+            || wait.seconds <= 0.0
+            || wait.seconds > 30.0
+        {
             anyhow::bail!(
                 "Step {} (wait): seconds must be between 0 and 30 (got {})",
                 index,
@@ -381,8 +405,7 @@ fn validate_step(
 
 /// Validates a navigate URL against security rules.
 fn validate_navigate_url(url_str: &str, allowed_domains: &HashSet<&str>) -> Result<()> {
-    let url = Url::parse(url_str)
-        .with_context(|| format!("Invalid URL: {}", url_str))?;
+    let url = Url::parse(url_str).with_context(|| format!("Invalid URL: {}", url_str))?;
 
     // Block dangerous schemes
     let scheme = url.scheme().to_lowercase();
@@ -416,10 +439,7 @@ fn validate_navigate_url(url_str: &str, allowed_domains: &HashSet<&str>) -> Resu
 }
 
 /// Populates the brokers table from validated playbooks.
-pub fn sync_brokers_to_db(
-    conn: &rusqlite::Connection,
-    playbooks: &[Playbook],
-) -> Result<()> {
+pub fn sync_brokers_to_db(conn: &rusqlite::Connection, playbooks: &[Playbook]) -> Result<()> {
     conn.execute_batch("BEGIN")?;
     for playbook in playbooks {
         let broker_row = db::BrokerRow {
@@ -516,7 +536,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "bad", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook with unknown fields should be rejected by deny_unknown_fields");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook with unknown fields should be rejected by deny_unknown_fields"
+        );
     }
 
     #[test]
@@ -538,7 +561,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "js", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook with javascript: navigate URL should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook with javascript: navigate URL should be rejected"
+        );
     }
 
     #[test]
@@ -560,7 +586,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "data", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook with data: navigate URL should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook with data: navigate URL should be rejected"
+        );
     }
 
     #[test]
@@ -582,7 +611,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "domain", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook navigating to domain outside allowed_domains should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook navigating to domain outside allowed_domains should be rejected"
+        );
     }
 
     #[test]
@@ -604,7 +636,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "http", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook with http: (non-HTTPS) navigate URL should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook with http: (non-HTTPS) navigate URL should be rejected"
+        );
     }
 
     #[test]
@@ -626,7 +661,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "field", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook using fill field not declared in required_fields should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook using fill field not declared in required_fields should be rejected"
+        );
     }
 
     #[test]
@@ -655,7 +693,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "toomany", &yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook exceeding MAX_PLAYBOOK_STEPS (50) should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook exceeding MAX_PLAYBOOK_STEPS (50) should be rejected"
+        );
     }
 
     #[test]
@@ -676,7 +717,10 @@ steps: []
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "empty", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook with empty steps list should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook with empty steps list should be rejected"
+        );
     }
 
     #[test]
@@ -698,7 +742,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "badcat", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook with invalid broker category should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook with invalid broker category should be rejected"
+        );
     }
 
     #[test]
@@ -720,7 +767,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "nodomains", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook with empty allowed_domains should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook with empty allowed_domains should be rejected"
+        );
     }
 
     #[test]
@@ -742,7 +792,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "longwait", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook with wait seconds > 30 should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook with wait seconds > 30 should be rejected"
+        );
     }
 
     #[test]
@@ -784,7 +837,10 @@ steps:
         let dir = tempfile::tempdir().unwrap();
         write_playbook(dir.path(), "official", "file", yaml);
         let playbooks = load_playbooks(dir.path()).unwrap();
-        assert!(playbooks.is_empty(), "Playbook with file: navigate URL should be rejected");
+        assert!(
+            playbooks.is_empty(),
+            "Playbook with file: navigate URL should be rejected"
+        );
     }
 
     #[test]
@@ -799,5 +855,93 @@ steps:
             ),
             Err(_) => {} // Returning an error is also acceptable
         }
+    }
+
+    #[test]
+    fn test_validate_playbook_file_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_playbook(dir.path(), "local", "test", &valid_playbook_yaml());
+        let result = validate_playbook_file(&path);
+        assert!(
+            result.is_ok(),
+            "Valid playbook should pass: {:?}",
+            result.err()
+        );
+        let playbook = result.unwrap();
+        assert_eq!(playbook.broker.id, "testbroker");
+        assert_eq!(playbook.trust_tier, "local");
+    }
+
+    #[test]
+    fn test_validate_playbook_file_missing_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+broker:
+  id: test
+  name: Test
+  url: https://test.com
+  category: people_search
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains: [test.com]
+
+steps:
+  - navigate: "https://test.com/optout"
+"#;
+        let path = dir.path().join("bad.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let result = validate_playbook_file(&path);
+        assert!(result.is_err(), "Missing required_fields should fail");
+    }
+
+    #[test]
+    fn test_validate_playbook_file_empty_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+broker:
+  id: test
+  name: Test
+  url: https://test.com
+  category: people_search
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains: [test.com]
+
+required_fields: [email]
+steps: []
+"#;
+        let path = dir.path().join("empty_steps.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let result = validate_playbook_file(&path);
+        assert!(result.is_err(), "Empty steps should fail");
+    }
+
+    #[test]
+    fn test_validate_playbook_file_invalid_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+broker:
+  id: test
+  name: Test
+  url: https://test.com
+  category: invalid_cat
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains: [test.com]
+
+required_fields: [email]
+steps:
+  - navigate: "https://test.com/optout"
+"#;
+        let path = dir.path().join("bad_cat.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let result = validate_playbook_file(&path);
+        assert!(result.is_err(), "Invalid category should fail");
+    }
+
+    #[test]
+    fn test_validate_playbook_file_nonexistent() {
+        let result = validate_playbook_file(Path::new("/nonexistent/playbook.yaml"));
+        assert!(result.is_err(), "Nonexistent file should fail");
     }
 }

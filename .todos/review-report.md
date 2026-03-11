@@ -1,75 +1,70 @@
 ---
-verdict: APPROVED_WITH_NOTES
-timestamp: 2026-02-25T16:31:00
-branch: issue-3-orchestrator
-agents: [security-reviewer, code-quality-reviewer, edge-case-reviewer, performance-reviewer, api-contract-reviewer]
-agents_unavailable: [concurrency-reviewer, error-handling-reviewer, testing-adequacy-reviewer, ui-reviewer]
-findings_total: 14
+verdict: FIX_BEFORE_COMMIT
+timestamp: 2026-03-01T19:45:00
+branch: issue-5-distribution-playbooks
+agents: [security-reviewer, code-quality-reviewer, edge-case-reviewer, concurrency-reviewer, error-handling-reviewer, dependency-reviewer, testing-adequacy-reviewer, documentation-reviewer, supervisor, adversarial-validator]
+findings_total: 17
 findings_critical: 0
-findings_high: 0
-findings_medium: 8
-findings_low: 6
-false_positives_removed: 11
+findings_high: 2
+review_pass: 2
 ---
 
-# Re-Review Report (Post-Fix)
+# Review Report (Re-Review After Fixes)
 
-## Context
+## MUST FIX (HIGH)
 
-Re-review after applying 12 CRITICAL/HIGH fixes from initial review.
-5 of 9 agents returned results (4 hit API rate limits).
-Previous CRITICAL/HIGH findings all verified as fixed.
+[CONS-004] HIGH: No tests for setup_worker core flows — src/worker_setup.rs
+  Source: TEST-001, TEST-002, TEST-003, TEST-004 (4 specialists)
+  Impact: run_command_with_timeout, run_npm_ci, run_patchright_install have zero tests. Regressions invisible.
+  Fix: Add tests for timeout kill path and install failure branches.
+  Acceptance: cargo test exercises timeout and both install failure paths.
 
-## FALSE POSITIVES REMOVED (11)
+[CONS-005] HIGH: verify_sha256 length check before ct_eq defeats timing-safety — src/download.rs:20-25
+  Source: CQ-005
+  Impact: Early return on length mismatch leaks whether hash is correct length, invalidating constant-time claim.
+  Fix: Remove explicit length check; let ct_eq handle differing-length slices, or hex::decode error.
+  Acceptance: No branch on len() before ct_eq.
 
-1. **TOCTOU in resolve/abandon_captcha** (flagged by 5 agents): The SELECT is only for error
-   message quality. The atomic UPDATE WHERE is the mutation guard. SQLite serializes writes.
-2. **MarkupDisplay::new_unsafe XSS** (CQ-008): In Askama, `new_unsafe` means "value is
-   untrusted, APPLY escaping." It does NOT bypass escaping.
-3. **NotFound mapped to 409** (API-007): `DashboardError::NotFound` correctly maps to 404.
-4. **get_health_stats queries** (PERF-001): Already combined 3 COUNTs into 1 in prior fix.
-5. **CSRF form body fallback** (API-006): Intentional design — header for htmx, form for login.
-6. **Bearer token precedence** (API-008): Intentional security design.
+## SHOULD FIX (MEDIUM)
 
-## SHOULD FIX (MEDIUM) — 8 findings
+[CONS-001] MEDIUM: 200ms busy-poll loop in run_command_with_timeout — src/worker_setup.rs:~499
+  Fix: Increase sleep to 1s for long-running commands.
 
-[CONS-R01] MEDIUM: constant_time_eq leaks token length via early return — auth.rs
-  Known trade-off. Localhost-only dashboard. Token format (64 hex chars) is not secret.
-  Fix: Hash both sides with SHA-256 before comparing.
+[CONS-006] MEDIUM: PID-only temp file name predictable under concurrent calls — src/download.rs:~79
+  Fix: Append thread ID or random suffix.
 
-[CONS-R02] MEDIUM: has_more pagination shows spurious "Next" on exact multiples — history.rs
-  `has_more = tasks.len() == 50` gives false positive when exactly 50 records exist.
-  Fix: Fetch limit+1 rows, check len > limit, truncate.
+[CONS-007] MEDIUM: I/O errors silently dropped in reader threads — src/worker_setup.rs:~471
+  Fix: Log warning on I/O failure in reader threads.
 
-[CONS-R03] MEDIUM: NULL completed_at rows reappear on every cursor page — db.rs
-  `OR t.completed_at IS NULL` in cursor WHERE not gated by cursor position.
-  Fix: Remove OR NULL from cursor WHERE; use NULLS LAST ordering instead.
+[CONS-008] MEDIUM: Second rename failure leaves no worker directory — src/worker_setup.rs:~263
+  Fix: Attempt to restore old_dir on second rename failure.
 
-[CONS-R04] MEDIUM: DRY violation in handler boilerplate — handlers/*.rs
-  Identical spawn_blocking/parse-ID/open-DB pattern in 4 handlers.
-  Fix: Extract `spawn_db_blocking` and `parse_positive_id` helpers.
+[CONS-009] MEDIUM: verify_chromium exposes node-reported path in error — src/worker_setup.rs:~438
+  Fix: Truncate or log at debug level only.
 
-[CONS-R05] MEDIUM: session_secret [u8; 32] not zeroized on drop — mod.rs
-  Raw array copied on Clone, not zeroed. Unlike SecretString/SecretBox.
-  Fix: Wrap in Arc<SecretBox<[u8; 32]>>.
+[CONS-010] MEDIUM: try_lock_exclusive discards original io::Error — src/worker_setup.rs:~325
+  Fix: Preserve OS error for non-contention failures.
 
-[CONS-R06] MEDIUM: std::sync::Mutex on async hot path — mod.rs
-  Login rate limiter uses std::sync::Mutex in async handler.
-  Fix: Acceptable (held for microseconds on VecDeque). Consider tokio::sync::Mutex if contention grows.
+[CONS-011] MEDIUM: Scopeguard version constraint too loose — Cargo.toml
+  Fix: Pin to scopeguard = "1.1".
 
-[CONS-R07] MEDIUM: SHA-256 token hash recomputed per authenticated request — auth.rs
-  verify_session_cookie recomputes SHA-256 digest of auth_token on every request.
-  Fix: Precompute at startup and store in DashboardState.
+## CONSIDER (LOW)
 
-[CONS-R08] MEDIUM: Unbounded CAPTCHA queue query — db.rs
-  No LIMIT on captcha queue SELECT. Could grow unbounded under adversarial conditions.
-  Fix: Add LIMIT 200 to query.
+[CONS-003] LOW: stderr included in CLI init error messages — src/worker_setup.rs
+[CONS-012] LOW: Init lock file no restrictive permissions — src/worker_setup.rs
+[CONS-013] LOW: Mutable @stable Rust toolchain tag in CI — ci.yml
+[CONS-014] LOW: hex in build-dependencies may be unused — Cargo.toml
+[CONS-015] LOW: No cargo audit in CI — ci.yml
+[CONS-016] LOW: verify_sha256 accepts uppercase hex silently — src/download.rs
+[CONS-017] LOW: Empty required_fields prints empty string — src/main.rs
 
-## CONSIDER (LOW) — 6 findings
+## AV ADJUSTMENTS
 
-[CONS-R09] LOW: verify_csrf name misleading (documents both header+form but only checks header)
-[CONS-R10] LOW: Hand-rolled cookie parsing (works correctly but fragile vs edge cases)
-[CONS-R11] LOW: email_limit hardcoded to 10 (not configurable from settings)
-[CONS-R12] LOW: Logout endpoint uses GET (susceptible to CSRF via img tags, low impact)
-[CONS-R13] LOW: check_task_expired treats unparseable timestamps as non-expired
-[CONS-R14] LOW: tokio::time::timeout on spawn_blocking doesn't cancel the OS thread
+- CONS-002 (build.rs sha256_file duplication) REMOVED: Build scripts cannot import from src/ — architecturally necessary separation.
+- CONS-003 (stderr in errors) DOWNGRADED HIGH→LOW: CLI init diagnostic, correct behavior.
+- CONS-001 (200ms poll) DOWNGRADED HIGH→MEDIUM: Acceptable tradeoff for CLI init simplicity.
+
+## TODO SPECIFICATIONS
+
+- File: src/download.rs | Lines: 20-25 | Action: Remove length check before ct_eq | Reason: CONS-005
+- File: src/worker_setup.rs | Lines: tests section | Action: Add timeout and install failure tests | Reason: CONS-004
