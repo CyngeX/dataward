@@ -8,11 +8,14 @@ use std::path::Path;
 use zeroize::Zeroize;
 
 /// HKDF install salt length (16 bytes, per RFC 5869 recommendation).
+#[allow(dead_code)]
 pub const HKDF_INSTALL_SALT_LEN: usize = 16;
 
 /// HKDF domain-separation labels (per RFC 5869: domain separation goes in `info`, NOT `salt`).
 /// See Phase 7 plan §K / SEC-R2-002.
+#[allow(dead_code)]
 pub const INFO_CREDSTORE: &[u8] = b"dataward/credstore/v1";
+#[allow(dead_code)]
 pub const INFO_DEDUP: &[u8] = b"dataward/dedup/v1";
 
 /// Derives a 32-byte subkey from a master key using HKDF-SHA256.
@@ -27,6 +30,7 @@ pub const INFO_DEDUP: &[u8] = b"dataward/dedup/v1";
 /// by RFC 5869. Reusing the same salt with different `info` values yields
 /// independent subkeys. Changing `salt` across installs prevents cross-install
 /// subkey collisions.
+#[allow(dead_code)]
 pub fn hkdf_subkey(master: &[u8], install_salt: &[u8], info: &[u8]) -> Result<[u8; 32]> {
     if master.is_empty() {
         anyhow::bail!("HKDF master key cannot be empty");
@@ -52,6 +56,7 @@ pub fn hkdf_subkey(master: &[u8], install_salt: &[u8], info: &[u8]) -> Result<[u
 /// Generates a fresh 16-byte HKDF install salt using the OS RNG.
 ///
 /// Call this once at `dataward init` and store the result in the database.
+#[allow(dead_code)]
 pub fn generate_install_salt() -> Result<[u8; HKDF_INSTALL_SALT_LEN]> {
     let mut salt = [0u8; HKDF_INSTALL_SALT_LEN];
     getrandom::fill(&mut salt).map_err(|e| anyhow::anyhow!("RNG error: {}", e))?;
