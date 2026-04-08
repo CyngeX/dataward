@@ -37,6 +37,7 @@ By continuing, you acknowledge that:
 ";
 
 /// Returns true if the user has previously accepted the legal disclaimer.
+#[allow(dead_code)]
 pub fn is_accepted(conn: &Connection) -> Result<bool> {
     Ok(db::get_config(conn, ACK_KEY)?.is_some())
 }
@@ -105,6 +106,7 @@ pub fn prompt_and_record_regulated(conn: &Connection) -> Result<()> {
 ///
 /// Returns an error if not accepted. Intended to be called at the entry point
 /// of `discover` and the scheduler, per the Phase 7 plan.
+#[allow(dead_code)]
 pub fn require_accepted(conn: &Connection) -> Result<()> {
     if !is_accepted(conn)? {
         anyhow::bail!(

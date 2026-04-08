@@ -171,6 +171,7 @@ pub fn create_db(db_path: &Path, passphrase: &str) -> Result<(Connection, Vec<u8
 ///
 /// # Security
 /// The backup is written with 0600 permissions on unix.
+#[allow(dead_code)]
 pub fn backup_to(conn: &Connection, dest_path: &Path) -> Result<()> {
     // SQLCipher disables SQLite's C-level online backup API. Use VACUUM INTO,
     // which SQLCipher DOES support for encrypted databases — the destination
@@ -434,6 +435,7 @@ fn apply_v2_schema(conn: &Connection) -> Result<()> {
 /// (caller is responsible for supplying the backup path).
 ///
 /// Idempotent: a second invocation on an already-v2 database is a no-op.
+#[allow(dead_code)]
 pub fn migrate_v1_to_v2(conn: &Connection, backup_path: &Path) -> Result<()> {
     // Idempotency: bail out if already at v2 or higher.
     let current: Option<i32> = conn
