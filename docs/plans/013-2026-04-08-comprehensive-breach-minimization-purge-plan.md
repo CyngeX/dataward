@@ -2,7 +2,7 @@
 title: "Phase 7: Breach-Minimization Purge (schema generalization + account discovery + platform playbooks)"
 date: 2026-04-08
 type: comprehensive
-status: approved
+status: in_progress
 tags: [schema-migration, account-discovery, breach-minimization, playbooks, imap, bitwarden, firefox, security-sensitive]
 risk_flags: [SECURITY_SENSITIVE, BREAKING_CHANGE]
 confidence: MEDIUM_CONFIDENCE
@@ -682,19 +682,29 @@ The round-2 plan review added 5 reviewers including an adversarial validator. Th
 
 ### J.5 Worker capability verification (ASSUMP-B)
 
-**Problem:** The plan assumes the existing Patchright worker (designed for public broker opt-out forms) can handle platform deletion flows, which require logged-in sessions and 2FA. This is unverified and likely false.
+**Status: RESOLVED 2026-04-08 (issue #13).** Full findings: [`docs/phase7-worker-investigation.md`](../phase7-worker-investigation.md).
 
-**Required before any Phase 7.3 playbook authoring begins:**
-- **Phase 7.0.5 (new prerequisite investigation task):** read `worker/` and `src/subprocess.rs` to determine:
-  - Does the worker support cookie/session persistence between steps?
-  - Is there any 2FA-handling primitive (TOTP prompt, SMS wait state, passkey)?
-  - Does the playbook YAML have actions like `wait_for_user_input` or `wait_for_totp`?
-- **Decision gate:** if the worker cannot handle logged-in + 2FA flows, then Phase 7.3 is scoped DOWN to: (a) `manual_only` playbooks with instructions for the user to execute, and (b) a small number of truly public deletion endpoints (e.g., Mozilla/Firefox account, some legacy forums). Financial/health are manual_only anyway per J.1/J.2.
-- **Do not begin Phase 7.3 until this investigation is complete and its findings are written into the plan.**
+**Answers to the three capability questions:**
 
-**New ACs:**
-- [ ] Phase 7.0.5 investigation complete and documented in this plan before Phase 7.3 starts
-- [ ] Phase 7.3 scope locked against the investigation findings, not the original assumption
+1. **Session persistence between steps?** **No.** `worker/src/worker.ts:119-125` builds a fresh `BrowserContext` per task with no `storage_state`; `worker.ts:171-178` unconditionally closes it in `finally`. `TaskInput` (`worker/src/types.ts:20-29`) has no session fields.
+2. **2FA-handling primitive?** **No.** `PlaybookStep` in `worker/src/types.ts:92-98` is a closed 6-variant union (navigate, fill, click, select, wait, screenshot). No TOTP, SMS, passkey, `wait_for_user_input`, or any runtime prompt mechanism. Worker stdin reads task-dispatch JSON only — no side-channel for human input.
+3. **User-interactive wait states in YAML?** **No.** `src/broker_registry.rs` uses `#[serde(deny_unknown_fields)]` on both `RawPlaybook` and `RawStep`; `WaitParams` is `{ seconds: number }` only. `manual_only` is a delivery-channel attribute, not a step type.
+
+**Decision (locked):** Phase 7.3 is scoped DOWN. The worker cannot handle logged-in + 2FA flows and no new worker primitives will be added in Phase 7. See §O for the revised priority order and the new Phase 7.3 shape, and the investigation doc for the full rationale.
+
+**Phase 7.3 revised shape:**
+- Ship the YAML schema extension (scaffold: `source_type`, `category`, `sensitivity_default`, `manual_instructions`) with `deny_unknown_fields` preserved.
+- Ship **3 reference playbooks**, all targeting **no-auth-required public deletion endpoints only** (candidates: Mozilla/Firefox Account deletion, legacy-forum public deletion pages, other public "delete my data" forms with no login wall).
+- Everything else — banks, health portals, dating, shopping behind logins — lands as `manual_only` platform_accounts. The dashboard renders `manual_instructions` as step-by-step guidance; the user executes by hand and confirms in the triage queue. This is consistent with J.1/J.2 which already force financial/health to `manual_only`.
+- `wait_for_user_input`, TOTP support, session persistence, email-link polling, and any dashboard↔worker runtime-prompt side-channel are **explicitly deferred** out of Phase 7.
+
+**ACs:**
+- [x] Phase 7.0.5 investigation complete and documented (`docs/phase7-worker-investigation.md`, issue #13)
+- [x] Phase 7.3 scope locked against the investigation findings, not the original assumption
+- [ ] (for Phase 7.3) Playbook YAML schema extended with platform fields (scaffold)
+- [ ] (for Phase 7.3) 3 reference playbooks shipped, all targeting no-auth public endpoints
+- [ ] (for Phase 7.3) `manual_only` platform_accounts render `manual_instructions` in the dashboard
+- [ ] (for Phase 7.3) No new runtime step types added to the worker
 
 ### J.6 First-run dry preview per playbook (BLIND-04)
 
@@ -796,12 +806,12 @@ Playbook tail is genuinely open-ended. Realistic velocity per real-world playboo
 
 ## O. Revised Priority Order (What To Do When)
 
-1. **Phase 7.0.5 FIRST** — investigate worker session/2FA capability. Block on the result. It may shrink Phase 7.3 dramatically.
+1. **Phase 7.0.5 — DONE (2026-04-08, issue #13).** Worker cannot handle logged-in + 2FA flows. No session persistence, no interactive step types, no user-input primitives. Phase 7.3 is now locked to "scaffold + 3 no-auth reference playbooks; everything else → `manual_only`." Full findings in `docs/phase7-worker-investigation.md` and §J.5 above. No new worker primitives will be added in Phase 7.
 2. **Phase 7.0** — backup helper, HKDF with correct info labels, `PR_SET_DUMPABLE` + `RLIMIT_CORE`, legal ack scaffolding.
 3. **Phase 7.1** — schema with sibling tables, two-FK CHECK, `k_dedup_version`, retention job skeleton.
 4. **Phase 7.2** — discovery importers with lockout/rate limits and Gmail ephemeral session.
-5. **Phase 7.4** — dashboard with CSRF, localhost bind, preview-before-first-run.
-6. **Phase 7.3** — playbook scaffolding + 3 reference playbooks. Real playbook authoring is the tail.
+5. **Phase 7.4** — dashboard with CSRF, localhost bind, preview-before-first-run, **`manual_instructions` rendering for `manual_only` platform_accounts** (new, per J.5 resolution).
+6. **Phase 7.3** — playbook YAML schema extension (scaffold) + 3 reference playbooks targeting **no-auth public endpoints only**. All authenticated / 2FA platforms land as `manual_only` entries with instructions rather than automated playbooks.
 7. **Phase 7.5** — end-to-end + security audit including error-chain scrubbing canary.
 
 ## P. Final Status
