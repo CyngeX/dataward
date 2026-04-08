@@ -147,6 +147,56 @@ pub fn create_db(db_path: &Path, passphrase: &str) -> Result<(Connection, Vec<u8
     create_db_with_params(db_path, passphrase, &crypto::PRODUCTION_PARAMS)
 }
 
+/// Creates a backup of the given database connection to `dest_path` using
+/// SQLite's online backup API.
+///
+/// The destination file inherits the same encryption key as the source
+/// connection (SQLCipher propagates the key through the backup handle).
+/// Caller is responsible for ensuring `dest_path`'s parent directory exists.
+///
+/// Intended to be called automatically at the start of any migration step —
+/// if the migration fails, the backup file can be swapped back in.
+///
+/// # Security
+/// The backup is written with 0600 permissions on unix.
+pub fn backup_to(conn: &Connection, dest_path: &Path) -> Result<()> {
+    // SQLCipher disables SQLite's C-level online backup API. Use VACUUM INTO,
+    // which SQLCipher DOES support for encrypted databases — the destination
+    // inherits the source's encryption key.
+    if dest_path.exists() {
+        std::fs::remove_file(dest_path).with_context(|| {
+            format!(
+                "Failed to remove existing backup file: {}",
+                dest_path.display()
+            )
+        })?;
+    }
+
+    // rusqlite does not parameterize file paths in pragmas/VACUUM, so we must
+    // embed the path. Guard against single-quote injection by rejecting any
+    // destination path containing a single quote.
+    let dest_str = dest_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Backup destination path is not valid UTF-8"))?;
+    if dest_str.contains('\'') {
+        anyhow::bail!("Backup destination path must not contain single quotes");
+    }
+
+    conn.execute(&format!("VACUUM INTO '{}'", dest_str), [])
+        .context("VACUUM INTO backup failed")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| {
+                format!("Failed to set permissions on backup: {}", dest_path.display())
+            })?;
+    }
+
+    Ok(())
+}
+
 /// Creates the database with explicit Argon2id parameters (used by tests).
 pub fn create_db_with_params(
     db_path: &Path,
@@ -1679,6 +1729,48 @@ mod tests {
         let (conn, _salt) =
             create_db_with_params(&db_path, "test-passphrase", &TEST_PARAMS).unwrap();
         (conn, dir)
+    }
+
+    #[test]
+    fn test_backup_to_roundtrip() {
+        // Phase 7.0: db::backup_to must produce a backup that round-trips via
+        // open_db_with_params with the same passphrase/salt.
+        let dir = tempdir().unwrap();
+        let src_path = dir.path().join("src.db");
+        let (src_conn, salt) =
+            create_db_with_params(&src_path, "backup-test-pass", &TEST_PARAMS).unwrap();
+
+        // Populate with a config row we can verify later.
+        set_config(&src_conn, "canary", "value-42").unwrap();
+
+        // Back up to a new path.
+        let dest_path = dir.path().join("backup.db");
+        backup_to(&src_conn, &dest_path).unwrap();
+        drop(src_conn);
+
+        assert!(dest_path.exists());
+
+        // Reopen the backup with the SAME passphrase + salt and verify the canary.
+        let restored =
+            open_db_with_params(&dest_path, "backup-test-pass", &salt, &TEST_PARAMS).unwrap();
+        let canary = get_config(&restored, "canary").unwrap();
+        assert_eq!(canary.as_deref(), Some("value-42"));
+    }
+
+    #[test]
+    fn test_backup_to_wrong_passphrase_fails() {
+        let dir = tempdir().unwrap();
+        let src_path = dir.path().join("src.db");
+        let (src_conn, salt) =
+            create_db_with_params(&src_path, "correct-pass", &TEST_PARAMS).unwrap();
+
+        let dest_path = dir.path().join("backup.db");
+        backup_to(&src_conn, &dest_path).unwrap();
+        drop(src_conn);
+
+        // Wrong passphrase must fail to open the backup.
+        let result = open_db_with_params(&dest_path, "wrong-pass", &salt, &TEST_PARAMS);
+        assert!(result.is_err());
     }
 
     #[test]

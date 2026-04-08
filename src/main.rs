@@ -7,6 +7,7 @@ mod db;
 mod download;
 mod email_worker;
 mod init;
+mod legal_ack;
 mod logging;
 mod orchestrator;
 mod rekey;
@@ -91,6 +92,13 @@ fn require_initialized(data_dir: &std::path::Path) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Phase 7.0 §L: harden against core dumps before loading any secrets.
+    // Prevents crash-time memory snapshots from leaking keys or PII.
+    if let Err(e) = crypto::harden_core_dumps() {
+        eprintln!("WARNING: failed to harden against core dumps: {}", e);
+        eprintln!("  Continuing, but memory-dump protection is NOT in effect.");
+    }
+
     let cli = Cli::parse();
     let data_dir = data_dir(cli.data_dir.as_ref())?;
 

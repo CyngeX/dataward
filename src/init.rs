@@ -60,7 +60,25 @@ pub async fn run_init(data_dir: &Path) -> Result<()> {
     eprintln!("your data cannot be recovered. Write it down somewhere safe.");
     eprintln!();
 
+    // Phase 7.0 §G: minimum 16-character passphrase policy.
+    // Replaces previously-planned zxcvbn complexity scoring with a simple
+    // length floor. Diceware-style passphrases are recommended but not
+    // enforced beyond the length check.
+    const MIN_PASSPHRASE_LEN: usize = 16;
+    eprintln!(
+        "Passphrase must be at least {} characters. Diceware-style passphrases",
+        MIN_PASSPHRASE_LEN
+    );
+    eprintln!("(e.g. 'correct-horse-battery-staple-zebra') are strongly recommended.");
+    eprintln!();
+
     let passphrase = crypto::get_passphrase("Passphrase: ")?;
+    if passphrase.chars().count() < MIN_PASSPHRASE_LEN {
+        anyhow::bail!(
+            "Passphrase too short — must be at least {} characters",
+            MIN_PASSPHRASE_LEN
+        );
+    }
     let confirm = crypto::get_passphrase("Confirm passphrase: ")?;
     if passphrase != confirm {
         anyhow::bail!("Passphrases do not match");
@@ -69,6 +87,16 @@ pub async fn run_init(data_dir: &Path) -> Result<()> {
     // Step 2: Create encrypted database
     let db_path = data_dir.join("dataward.db");
     let (conn, salt) = db::create_db(&db_path, &passphrase)?;
+
+    // Phase 7.0 §K: generate and store per-install HKDF salt for subkey derivation.
+    // Stored as hex in the encrypted config table. Used with INFO_CREDSTORE /
+    // INFO_DEDUP labels to derive domain-separated subkeys from the master key.
+    let install_salt = crypto::generate_install_salt()?;
+    db::set_config(&conn, "hkdf_install_salt", &hex::encode(install_salt))?;
+
+    // Phase 7.0 §J.2: require legal acknowledgment before writing any PII.
+    // The user MUST type "I AGREE" or init aborts.
+    crate::legal_ack::prompt_and_record(&conn)?;
 
     // Store the salt in a separate file (not sensitive — only useful with passphrase)
     let salt_path = data_dir.join(".salt");

@@ -27,7 +27,7 @@ askama = "0.12"
 askama_axum = "0.4"
 
 # Database (SQLCipher encrypted SQLite)
-rusqlite = { version = "0.33", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.33", features = ["bundled-sqlcipher", "backup"] }
 
 # Email
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
@@ -81,7 +81,9 @@ dirs = "6"
 rpassword = "7"
 uuid = { version = "1", features = ["v4"] }
 hmac = "0.12"
+hkdf = "0.12"
 sha2 = "0.10"
+libc = "0.2"
 base64 = "0.22"
 
 [features]
