@@ -11,6 +11,7 @@ mod legal_ack;
 mod logging;
 mod orchestrator;
 mod rekey;
+mod retention;
 mod scheduler;
 mod status;
 mod subprocess;

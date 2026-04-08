@@ -7,7 +7,19 @@ use tokio::sync::mpsc;
 use crate::crypto;
 
 /// Database schema version for migration tracking.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
+
+/// Source type discriminator for the credential_store FK arms.
+///
+/// Credential_store uses two nullable FKs (one to `brokers`, one to
+/// `platform_accounts`) with a CHECK constraint enforcing exactly-one-or-none,
+/// per ARCH-R2. This enum is the Rust-side tag used by DAO callers.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceType {
+    Broker,
+    PlatformAccount,
+}
 
 /// Opens (or creates) the SQLCipher-encrypted database with WAL mode.
 pub fn open_db(db_path: &Path, passphrase: &str, salt: &[u8]) -> Result<Connection> {
@@ -188,10 +200,14 @@ pub fn backup_to(conn: &Connection, dest_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dest_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| {
-                format!("Failed to set permissions on backup: {}", dest_path.display())
-            })?;
+        std::fs::set_permissions(dest_path, std::fs::Permissions::from_mode(0o600)).with_context(
+            || {
+                format!(
+                    "Failed to set permissions on backup: {}",
+                    dest_path.display()
+                )
+            },
+        )?;
     }
 
     Ok(())
@@ -305,6 +321,9 @@ fn apply_schema(conn: &Connection) -> Result<()> {
     )
     .context("Failed to apply database schema")?;
 
+    // Phase 7.1: sibling tables (additive; does NOT touch `brokers`).
+    apply_v2_schema(conn)?;
+
     // Set schema version
     let current_version: Option<i32> = conn
         .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
@@ -321,6 +340,400 @@ fn apply_schema(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Applies the Phase 7.1 sibling-table schema (v2).
+///
+/// Idempotent via `IF NOT EXISTS`. Does NOT touch the existing `brokers`
+/// table, per ARCH-001/002/003 — this is an additive migration only.
+fn apply_v2_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        -- Phase 7.1 §B: platform_accounts sibling table.
+        CREATE TABLE IF NOT EXISTS platform_accounts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            sensitivity TEXT NOT NULL CHECK (sensitivity IN ('low','medium','high')),
+            playbook_path TEXT,
+            manual_instructions TEXT,
+            discovery_source TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_action_at TEXT
+        );
+
+        -- Phase 7.1 §B: credential_store with two nullable FKs + CHECK (ARCH-R2).
+        -- Ciphertext is (nonce || ct) from crypto::encrypt_aes256gcm using the
+        -- k_credstore subkey derived via HKDF (Phase 7.0).
+        CREATE TABLE IF NOT EXISTS credential_store (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            broker_id TEXT REFERENCES brokers(id) ON DELETE CASCADE,
+            platform_account_id TEXT REFERENCES platform_accounts(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            ciphertext BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            CHECK (
+                (broker_id IS NOT NULL AND platform_account_id IS NULL)
+                OR (broker_id IS NULL AND platform_account_id IS NOT NULL)
+                OR (broker_id IS NULL AND platform_account_id IS NULL)
+            )
+        );
+
+        -- Phase 7.1 §B: account_discovery_findings.
+        -- k_dedup_version supports key rotation (SEC-R2-008).
+        -- username_hmac is NFC + case-fold + HMAC with k_dedup (NOT raw SHA-256).
+        -- dedup_hash is length-prefixed HMAC over (domain, username).
+        CREATE TABLE IF NOT EXISTS account_discovery_findings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain TEXT NOT NULL,
+            username_hmac BLOB NOT NULL,
+            dedup_hash BLOB NOT NULL,
+            k_dedup_version INTEGER NOT NULL DEFAULT 1,
+            sensitivity TEXT NOT NULL CHECK (sensitivity IN ('low','medium','high')),
+            discovery_source TEXT NOT NULL,
+            triage_status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (triage_status IN ('pending','accepted','dismissed','already_tracked')),
+            promoted_to_platform_account_id TEXT
+                REFERENCES platform_accounts(id) ON DELETE SET NULL,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            triaged_at TEXT
+        );
+
+        -- Indexes per issue spec.
+        CREATE INDEX IF NOT EXISTS idx_findings_triage
+            ON account_discovery_findings(triage_status, sensitivity);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_dedup
+            ON account_discovery_findings(dedup_hash);
+        -- ARCH-R5: no double-promotion.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_promoted
+            ON account_discovery_findings(promoted_to_platform_account_id)
+            WHERE promoted_to_platform_account_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_platform_accounts_status
+            ON platform_accounts(status);
+        CREATE INDEX IF NOT EXISTS idx_platform_accounts_sensitivity
+            ON platform_accounts(sensitivity);
+        CREATE INDEX IF NOT EXISTS idx_credential_store_broker
+            ON credential_store(broker_id);
+        CREATE INDEX IF NOT EXISTS idx_credential_store_platform_account
+            ON credential_store(platform_account_id);
+        ",
+    )
+    .context("Failed to apply v2 (Phase 7.1) schema")?;
+    Ok(())
+}
+
+/// Migrates a v1 database to v2 (Phase 7.1 sibling tables).
+///
+/// Wraps the entire migration in `BEGIN IMMEDIATE ... COMMIT`. Version stamp
+/// is only updated on COMMIT, so a crash leaves the DB at v1 and the next
+/// open retries. A backup is taken via `backup_to` before the migration body
+/// (caller is responsible for supplying the backup path).
+///
+/// Idempotent: a second invocation on an already-v2 database is a no-op.
+pub fn migrate_v1_to_v2(conn: &Connection, backup_path: &Path) -> Result<()> {
+    // Idempotency: bail out if already at v2 or higher.
+    let current: Option<i32> = conn
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .ok();
+    if current.unwrap_or(0) >= 2 {
+        return Ok(());
+    }
+
+    // Phase 7.0 §K: auto-backup before migration body.
+    backup_to(conn, backup_path).context("Pre-migration backup failed")?;
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin migration transaction")?;
+
+    let result = (|| -> Result<()> {
+        apply_v2_schema(conn)?;
+        conn.execute("UPDATE schema_version SET version = ?1", [2])
+            .context("Failed to bump schema_version to 2")?;
+        // Safety net: schema_version might be empty on very old installs.
+        let n: i32 = conn.query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))?;
+        if n == 0 {
+            conn.execute("INSERT INTO schema_version (version) VALUES (2)", [])?;
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit migration")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e.context("Migration v1→v2 failed and was rolled back"))
+        }
+    }
+}
+
+// -- Phase 7.1 sibling-table DAOs --
+
+/// A row in `platform_accounts` (Phase 7.1 §B).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PlatformAccountRow {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub sensitivity: String,
+    pub playbook_path: Option<String>,
+    pub manual_instructions: Option<String>,
+    pub discovery_source: Option<String>,
+    pub status: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_action_at: Option<String>,
+}
+
+/// Inserts a new platform account.
+#[allow(dead_code)]
+pub fn insert_platform_account(conn: &Connection, row: &PlatformAccountRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO platform_accounts (
+            id, name, category, sensitivity, playbook_path, manual_instructions,
+            discovery_source, status, enabled, created_at, updated_at, last_action_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            row.id,
+            row.name,
+            row.category,
+            row.sensitivity,
+            row.playbook_path,
+            row.manual_instructions,
+            row.discovery_source,
+            row.status,
+            row.enabled as i32,
+            row.created_at,
+            row.updated_at,
+            row.last_action_at,
+        ],
+    )
+    .context("Failed to insert platform_account")?;
+    Ok(())
+}
+
+/// Fetches a platform account by id.
+#[allow(dead_code)]
+pub fn get_platform_account(conn: &Connection, id: &str) -> Result<Option<PlatformAccountRow>> {
+    conn.query_row(
+        "SELECT id, name, category, sensitivity, playbook_path, manual_instructions,
+                discovery_source, status, enabled, created_at, updated_at, last_action_at
+         FROM platform_accounts WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(PlatformAccountRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                category: row.get(2)?,
+                sensitivity: row.get(3)?,
+                playbook_path: row.get(4)?,
+                manual_instructions: row.get(5)?,
+                discovery_source: row.get(6)?,
+                status: row.get(7)?,
+                enabled: row.get::<_, i32>(8)? != 0,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+                last_action_at: row.get(11)?,
+            })
+        },
+    )
+    .optional()
+    .context("Failed to load platform_account")
+}
+
+/// Updates the status of a platform account.
+#[allow(dead_code)]
+pub fn update_platform_account_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    updated_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE platform_accounts SET status = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![status, updated_at, id],
+    )?;
+    Ok(())
+}
+
+/// A row in `credential_store` (Phase 7.1 §B).
+///
+/// Exactly one of `broker_id` and `platform_account_id` may be Some (or both
+/// None for orphan rows), enforced by the table CHECK constraint.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct CredentialStoreRow {
+    pub id: Option<i64>,
+    pub broker_id: Option<String>,
+    pub platform_account_id: Option<String>,
+    pub label: String,
+    /// Nonce-prefixed ciphertext from `crypto::encrypt_aes256gcm(k_credstore, plaintext)`.
+    pub ciphertext: Vec<u8>,
+    pub created_at: String,
+}
+
+/// Inserts an encrypted credential row.
+#[allow(dead_code)]
+pub fn insert_credential(conn: &Connection, row: &CredentialStoreRow) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO credential_store
+            (broker_id, platform_account_id, label, ciphertext, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            row.broker_id,
+            row.platform_account_id,
+            row.label,
+            row.ciphertext,
+            row.created_at
+        ],
+    )
+    .context("Failed to insert credential_store row")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Decrypts the credential ciphertext with the caller-supplied k_credstore key
+/// and passes the plaintext to a short-lived closure. The plaintext is zeroed
+/// immediately after the closure returns. Plaintext is never stringified or
+/// returned through this function.
+#[allow(dead_code)]
+pub fn with_credential_plaintext<F, R>(
+    conn: &Connection,
+    credential_id: i64,
+    k_credstore: &[u8],
+    f: F,
+) -> Result<R>
+where
+    F: FnOnce(&[u8]) -> Result<R>,
+{
+    let ciphertext: Vec<u8> = conn.query_row(
+        "SELECT ciphertext FROM credential_store WHERE id = ?1",
+        [credential_id],
+        |row| row.get(0),
+    )?;
+    let mut plaintext = crypto::decrypt_aes256gcm(k_credstore, &ciphertext)?;
+    let result = f(&plaintext);
+    use zeroize::Zeroize;
+    plaintext.zeroize();
+    result
+}
+
+/// A row in `account_discovery_findings` (Phase 7.1 §B).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct DiscoveryFindingRow {
+    pub id: Option<i64>,
+    pub domain: String,
+    /// HMAC(k_dedup, NFC(case_fold(username))) — never raw SHA-256.
+    pub username_hmac: Vec<u8>,
+    /// Length-prefixed HMAC over (domain, username). Unique across findings.
+    pub dedup_hash: Vec<u8>,
+    pub k_dedup_version: i32,
+    pub sensitivity: String,
+    pub discovery_source: String,
+    pub triage_status: String,
+    pub promoted_to_platform_account_id: Option<String>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub triaged_at: Option<String>,
+}
+
+/// Inserts a discovery finding. Returns the new row id, or Ok(None) if a row
+/// with the same `dedup_hash` already exists (uniqueness enforced by index).
+#[allow(dead_code)]
+pub fn insert_discovery_finding(
+    conn: &Connection,
+    row: &DiscoveryFindingRow,
+) -> Result<Option<i64>> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO account_discovery_findings (
+            domain, username_hmac, dedup_hash, k_dedup_version, sensitivity,
+            discovery_source, triage_status, promoted_to_platform_account_id,
+            first_seen_at, last_seen_at, triaged_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        rusqlite::params![
+            row.domain,
+            row.username_hmac,
+            row.dedup_hash,
+            row.k_dedup_version,
+            row.sensitivity,
+            row.discovery_source,
+            row.triage_status,
+            row.promoted_to_platform_account_id,
+            row.first_seen_at,
+            row.last_seen_at,
+            row.triaged_at,
+        ],
+    )?;
+    if n == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(conn.last_insert_rowid()))
+    }
+}
+
+/// Updates the triage status of a finding.
+#[allow(dead_code)]
+pub fn update_finding_triage(
+    conn: &Connection,
+    id: i64,
+    triage_status: &str,
+    triaged_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE account_discovery_findings
+            SET triage_status = ?1, triaged_at = ?2
+            WHERE id = ?3",
+        rusqlite::params![triage_status, triaged_at, id],
+    )?;
+    Ok(())
+}
+
+/// Computes the length-prefixed dedup hash per Phase 7.1 §B.
+///
+/// HMAC(k_dedup, len(domain) || ":" || domain || ":" || len(username) || ":" || username)
+/// where lengths are ASCII-decimal. This avoids collisions between e.g.
+/// (domain="a", user="bc") and (domain="ab", user="c").
+#[allow(dead_code)]
+pub fn compute_dedup_hash(k_dedup: &[u8], domain: &str, username: &str) -> Result<Vec<u8>> {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(k_dedup)
+        .map_err(|e| anyhow::anyhow!("HMAC init failed: {}", e))?;
+    let len_domain = domain.len().to_string();
+    let len_user = username.len().to_string();
+    mac.update(len_domain.as_bytes());
+    mac.update(b":");
+    mac.update(domain.as_bytes());
+    mac.update(b":");
+    mac.update(len_user.as_bytes());
+    mac.update(b":");
+    mac.update(username.as_bytes());
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+/// Normalizes a username via NFC case-folding and returns HMAC(k_dedup, normalized).
+///
+/// This is a simplified form — full Unicode NFC requires the `unicode-normalization`
+/// crate. For Phase 7.1 we use ASCII lowercasing as a placeholder; callers SHOULD
+/// upgrade to NFC in a later phase once the crate is added.
+#[allow(dead_code)]
+pub fn compute_username_hmac(k_dedup: &[u8], username: &str) -> Result<Vec<u8>> {
+    use hmac::{Hmac, Mac};
+    let normalized = username.to_lowercase();
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(k_dedup)
+        .map_err(|e| anyhow::anyhow!("HMAC init failed: {}", e))?;
+    mac.update(normalized.as_bytes());
+    Ok(mac.finalize().into_bytes().to_vec())
 }
 
 // -- User profile helpers --
@@ -1729,6 +2142,191 @@ mod tests {
         let (conn, _salt) =
             create_db_with_params(&db_path, "test-passphrase", &TEST_PARAMS).unwrap();
         (conn, dir)
+    }
+
+    #[test]
+    fn test_phase7_1_schema_creates_sibling_tables() {
+        let (conn, _dir) = create_test_db();
+        for t in [
+            "platform_accounts",
+            "credential_store",
+            "account_discovery_findings",
+        ] {
+            let n: i32 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [t],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "table {} missing", t);
+        }
+    }
+
+    #[test]
+    fn test_credential_store_check_rejects_both_fks() {
+        let (conn, _dir) = create_test_db();
+        conn.execute(
+            "INSERT INTO brokers (id, name, category, opt_out_channel, recheck_days, playbook_path)
+             VALUES ('b1','BrokerOne','people','email',90,'/tmp/p.yaml')",
+            [],
+        )
+        .unwrap();
+        let pa = PlatformAccountRow {
+            id: "pa1".into(),
+            name: "PlatformOne".into(),
+            category: "social".into(),
+            sensitivity: "low".into(),
+            playbook_path: None,
+            manual_instructions: None,
+            discovery_source: None,
+            status: "pending".into(),
+            enabled: true,
+            created_at: "2026-04-08T00:00:00Z".into(),
+            updated_at: "2026-04-08T00:00:00Z".into(),
+            last_action_at: None,
+        };
+        insert_platform_account(&conn, &pa).unwrap();
+
+        let result = conn.execute(
+            "INSERT INTO credential_store
+                (broker_id, platform_account_id, label, ciphertext, created_at)
+             VALUES ('b1','pa1','bad',x'00',?1)",
+            ["2026-04-08T00:00:00Z"],
+        );
+        assert!(result.is_err(), "CHECK constraint should reject dual FKs");
+    }
+
+    #[test]
+    fn test_credential_store_accepts_single_fk() {
+        let (conn, _dir) = create_test_db();
+        conn.execute(
+            "INSERT INTO brokers (id, name, category, opt_out_channel, recheck_days, playbook_path)
+             VALUES ('b1','BrokerOne','people','email',90,'/tmp/p.yaml')",
+            [],
+        )
+        .unwrap();
+        let row = CredentialStoreRow {
+            id: None,
+            broker_id: Some("b1".into()),
+            platform_account_id: None,
+            label: "primary".into(),
+            ciphertext: vec![0u8; 32],
+            created_at: "2026-04-08T00:00:00Z".into(),
+        };
+        insert_credential(&conn, &row).unwrap();
+    }
+
+    #[test]
+    fn test_discovery_finding_dedup_hash_unique() {
+        let (conn, _dir) = create_test_db();
+        let row1 = DiscoveryFindingRow {
+            id: None,
+            domain: "example.com".into(),
+            username_hmac: vec![1u8; 32],
+            dedup_hash: vec![0xAA; 32],
+            k_dedup_version: 1,
+            sensitivity: "low".into(),
+            discovery_source: "test".into(),
+            triage_status: "pending".into(),
+            promoted_to_platform_account_id: None,
+            first_seen_at: "2026-04-08T00:00:00Z".into(),
+            last_seen_at: "2026-04-08T00:00:00Z".into(),
+            triaged_at: None,
+        };
+        let id = insert_discovery_finding(&conn, &row1).unwrap();
+        assert!(id.is_some());
+        let id2 = insert_discovery_finding(&conn, &row1).unwrap();
+        assert!(id2.is_none(), "dedup_hash uniqueness must block duplicate");
+    }
+
+    #[test]
+    fn test_no_double_promotion_index() {
+        let (conn, _dir) = create_test_db();
+        let pa = PlatformAccountRow {
+            id: "pa1".into(),
+            name: "P".into(),
+            category: "c".into(),
+            sensitivity: "low".into(),
+            playbook_path: None,
+            manual_instructions: None,
+            discovery_source: None,
+            status: "active".into(),
+            enabled: true,
+            created_at: "2026-04-08T00:00:00Z".into(),
+            updated_at: "2026-04-08T00:00:00Z".into(),
+            last_action_at: None,
+        };
+        insert_platform_account(&conn, &pa).unwrap();
+
+        let row = DiscoveryFindingRow {
+            id: None,
+            domain: "x.com".into(),
+            username_hmac: vec![1u8; 32],
+            dedup_hash: vec![0x11; 32],
+            k_dedup_version: 1,
+            sensitivity: "low".into(),
+            discovery_source: "test".into(),
+            triage_status: "accepted".into(),
+            promoted_to_platform_account_id: Some("pa1".into()),
+            first_seen_at: "2026-04-08T00:00:00Z".into(),
+            last_seen_at: "2026-04-08T00:00:00Z".into(),
+            triaged_at: Some("2026-04-08T00:00:00Z".into()),
+        };
+        insert_discovery_finding(&conn, &row).unwrap();
+
+        let result = conn.execute(
+            "INSERT INTO account_discovery_findings (
+                domain, username_hmac, dedup_hash, k_dedup_version, sensitivity,
+                discovery_source, triage_status, promoted_to_platform_account_id,
+                first_seen_at, last_seen_at, triaged_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "x2.com",
+                vec![2u8; 32],
+                vec![0x22u8; 32],
+                1_i32,
+                "low",
+                "test",
+                "accepted",
+                "pa1",
+                "2026-04-08T00:00:00Z",
+                "2026-04-08T00:00:00Z",
+                "2026-04-08T00:00:00Z",
+            ],
+        );
+        assert!(
+            result.is_err(),
+            "unique promoted index should reject double-promotion"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v1_to_v2_idempotent() {
+        let (conn, dir) = create_test_db();
+        let backup = dir.path().join("backup.db");
+        migrate_v1_to_v2(&conn, &backup).unwrap();
+        migrate_v1_to_v2(&conn, &backup).unwrap();
+        let version: i32 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn test_compute_dedup_hash_length_prefixed() {
+        let key = [0u8; 32];
+        let h1 = compute_dedup_hash(&key, "a", "bc").unwrap();
+        let h2 = compute_dedup_hash(&key, "ab", "c").unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_compute_username_hmac_case_insensitive() {
+        let key = [0u8; 32];
+        let h1 = compute_username_hmac(&key, "Alice").unwrap();
+        let h2 = compute_username_hmac(&key, "alice").unwrap();
+        assert_eq!(h1, h2);
     }
 
     #[test]
