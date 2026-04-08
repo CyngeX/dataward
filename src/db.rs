@@ -160,19 +160,30 @@ pub fn create_db(db_path: &Path, passphrase: &str) -> Result<(Connection, Vec<u8
 /// # Security
 /// The backup is written with 0600 permissions on unix.
 pub fn backup_to(conn: &Connection, dest_path: &Path) -> Result<()> {
-    let mut dest = Connection::open(dest_path)
-        .with_context(|| format!("Failed to open backup destination: {}", dest_path.display()))?;
-
-    {
-        let backup = rusqlite::backup::Backup::new(conn, &mut dest)
-            .context("Failed to initialize SQLite online backup")?;
-        backup
-            .run_to_completion(100, std::time::Duration::from_millis(0), None)
-            .context("SQLite online backup failed")?;
+    // SQLCipher disables SQLite's C-level online backup API. Use VACUUM INTO,
+    // which SQLCipher DOES support for encrypted databases — the destination
+    // inherits the source's encryption key.
+    if dest_path.exists() {
+        std::fs::remove_file(dest_path).with_context(|| {
+            format!(
+                "Failed to remove existing backup file: {}",
+                dest_path.display()
+            )
+        })?;
     }
 
-    // Close the destination handle before setting permissions.
-    drop(dest);
+    // rusqlite does not parameterize file paths in pragmas/VACUUM, so we must
+    // embed the path. Guard against single-quote injection by rejecting any
+    // destination path containing a single quote.
+    let dest_str = dest_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Backup destination path is not valid UTF-8"))?;
+    if dest_str.contains('\'') {
+        anyhow::bail!("Backup destination path must not contain single quotes");
+    }
+
+    conn.execute(&format!("VACUUM INTO '{}'", dest_str), [])
+        .context("VACUUM INTO backup failed")?;
 
     #[cfg(unix)]
     {
