@@ -12,7 +12,7 @@
 //! - [ ] `firefox` — scaffold only; returns `DiscoveryError::NotImplemented`
 //! - [ ] `gmail_imap` — scaffold only; requires `async-imap 0.11+` (not yet added)
 //! - [x] `normalize` — ASCII case-fold + trim (NFC upgrade TODO when
-//!       `unicode-normalization` is added)
+//!   `unicode-normalization` is added)
 //! - [x] `scoring` — 3-tier category map
 //! - [x] `scrub` — credential scrubber for Result chains
 

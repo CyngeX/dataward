@@ -42,10 +42,7 @@ pub fn extract_host(input: &str) -> String {
         without_scheme
     };
     // Strip path/query/fragment.
-    let host = without_userinfo
-        .split(|c: char| c == '/' || c == '?' || c == '#')
-        .next()
-        .unwrap_or("");
+    let host = without_userinfo.split(['/', '?', '#']).next().unwrap_or("");
     // Strip port.
     let host = host.split(':').next().unwrap_or("");
     host.to_ascii_lowercase()
