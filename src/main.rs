@@ -4,6 +4,7 @@ mod config;
 mod crypto;
 mod dashboard;
 mod db;
+mod discovery;
 mod download;
 mod email_worker;
 mod init;
