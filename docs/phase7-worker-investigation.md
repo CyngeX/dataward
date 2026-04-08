@@ -69,7 +69,8 @@ No conditionals, no branching, no loops, no user prompts, no session save/load.
 
 - One-shot public opt-out forms (the current people-search broker pattern).
 - Simple unauthenticated deletion requests — for example, a public "request deletion" form that only needs name/email and emits a confirmation email the service handles server-side.
-- Short authenticated flows **only if** the entire login → action → confirmation sequence fits inside one playbook with no 2FA and no email-link verification. In practice this is rare enough to ignore as a design target.
+
+Sites with any authentication step are **out of scope** for automation, even if the login itself could technically happen within a single playbook run: any 2FA, email verification, or cross-run session reuse breaks the model, and every realistic login-gated deletion flow we care about requires at least one of those.
 
 ### What the worker CANNOT automate (with the current architecture)
 
