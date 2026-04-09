@@ -1,0 +1,28 @@
+# Phase 7.3 reference playbook — non-regulated web_form example.
+#
+# Demonstrates a platform_account playbook with an automated web-form
+# opt-out flow. Uses a non-regulated category (`forum`) so automation is
+# allowed by default.
+broker:
+  id: example-forum
+  name: Example Forum
+  url: https://forum.example.com
+  source_type: platform_account
+  category: forum
+  sensitivity_default: low
+  recheck_days: 180
+  opt_out_channel: web_form
+  allowed_domains:
+    - forum.example.com
+    - www.forum.example.com
+
+required_fields:
+  - email
+
+steps:
+  - navigate: "https://forum.example.com/account/delete"
+  - wait: { seconds: 2 }
+  - fill: { selector: "input[name=email]", field: "email" }
+  - click: { selector: "button#confirm-delete" }
+  - wait: { seconds: 3 }
+  - screenshot: { name: "delete-confirmation" }

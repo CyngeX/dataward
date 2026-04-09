@@ -1,0 +1,31 @@
+# Phase 7.3 reference playbook — manual_only example with instructions.
+#
+# Demonstrates a `manual_only` playbook where Dataward surfaces
+# instructions for the user to perform the opt-out themselves. Required
+# for regulated categories (financial/health/government) unless the user
+# has explicitly enabled regulated-category automation in config.
+broker:
+  id: example-bank
+  name: Example Bank
+  url: https://bank.example.com
+  source_type: platform_account
+  category: financial
+  sensitivity_default: high
+  recheck_days: 365
+  opt_out_channel: manual_only
+  manual_instructions: |
+    1. Log in to your Example Bank account at https://bank.example.com
+    2. Navigate to Settings → Privacy → Data Requests
+    3. Select "Request deletion of marketing profile data"
+    4. Confirm via the email link sent to your registered address
+    5. Keep the confirmation screenshot for your records
+
+    Note: bank accounts cannot be closed via automation. For full account
+    closure, call the branch directly. Dataward will NOT attempt to log in
+    to your financial institution.
+  allowed_domains:
+    - bank.example.com
+
+required_fields: []
+
+steps: []

@@ -1,0 +1,25 @@
+# Phase 7.3 reference playbook — GDPR/CCPA email template example.
+#
+# Demonstrates an email-channel platform_account playbook. No browser
+# automation — the opt-out is a templated email to the privacy address.
+broker:
+  id: example-email-platform
+  name: Example Email Platform
+  url: https://example-email-platform.com
+  source_type: platform_account
+  category: social
+  sensitivity_default: medium
+  recheck_days: 180
+  opt_out_channel: email
+  allowed_domains:
+    - example-email-platform.com
+
+required_fields:
+  - email
+  - first_name
+  - last_name
+
+# Email-channel playbooks have zero browser steps. The email worker
+# reads required_fields and sends a templated GDPR/CCPA request to the
+# privacy address registered for this platform elsewhere in config.
+steps: []
