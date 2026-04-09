@@ -15,8 +15,32 @@ const BLOCKED_SCHEMES: &[&str] = &["javascript", "data", "file", "blob"];
 /// Valid opt-out channels.
 const VALID_CHANNELS: &[&str] = &["web_form", "email", "api", "manual_only"];
 
+/// Categories considered regulated (Phase 7.3 §J.1/J.2).
+///
+/// Playbooks with these categories MUST use `manual_only` unless the user
+/// explicitly sets `automation_allowed_for_regulated_categories = true` in
+/// config. This gate defends against the foot-gun where a well-meaning
+/// playbook author automates a flow that could trip account lockouts or
+/// violate compliance requirements.
+const REGULATED_CATEGORIES: &[&str] = &["financial", "health", "government"];
+
 /// Valid broker categories.
-const VALID_CATEGORIES: &[&str] = &["people_search", "marketing", "background_check", "ad_tech"];
+const VALID_CATEGORIES: &[&str] = &[
+    // Original (data-broker) categories
+    "people_search",
+    "marketing",
+    "background_check",
+    "ad_tech",
+    // Phase 7.3: platform_account categories
+    "financial",
+    "health",
+    "dating",
+    "forum",
+    "cloud",
+    "social",
+    "shopping",
+    "government",
+];
 
 /// Valid on_error strategies.
 const VALID_ON_ERROR: &[&str] = &["retry", "skip", "fail"];
@@ -57,7 +81,27 @@ pub struct BrokerDefinition {
     /// domains NOT listed, but does not prevent a malicious playbook author from declaring
     /// arbitrary domains.
     pub allowed_domains: Vec<String>,
+    /// Phase 7.3 §A: source discriminator. Default `"data_broker"` preserves
+    /// existing broker playbook behavior exactly. Platform-account playbooks
+    /// set this to `"platform_account"`.
+    #[serde(default = "default_source_type")]
+    pub source_type: String,
+    /// Phase 7.3: optional default sensitivity tier (`high`|`medium`|`low`).
+    /// Falls back to the scoring.rs heuristic when absent.
+    #[serde(default)]
+    pub sensitivity_default: Option<String>,
+    /// Phase 7.3 §J.1/J.2: required when any channel is `manual_only`, and
+    /// strongly recommended for regulated categories even when automated.
+    #[serde(default)]
+    pub manual_instructions: Option<String>,
 }
+
+fn default_source_type() -> String {
+    "data_broker".to_string()
+}
+
+const VALID_SOURCE_TYPES: &[&str] = &["data_broker", "platform_account"];
+const VALID_SENSITIVITY: &[&str] = &["low", "medium", "high"];
 
 /// Raw playbook YAML structure for deserialization.
 #[derive(Debug, Deserialize)]
@@ -233,9 +277,18 @@ fn load_and_validate_playbook(path: &Path, trust_tier: &str) -> Result<Playbook>
         );
     }
 
-    // Validate step count
-    if raw.steps.is_empty() {
-        anyhow::bail!("Playbook has no steps");
+    // Validate step count.
+    //
+    // Phase 7.3: email and manual_only playbooks legitimately have zero
+    // browser steps — the email worker templates from required_fields, and
+    // manual_only surfaces manual_instructions to the user. web_form and
+    // api channels still require at least one step.
+    let channel_requires_steps = matches!(raw.broker.opt_out_channel.as_str(), "web_form" | "api");
+    if channel_requires_steps && raw.steps.is_empty() {
+        anyhow::bail!(
+            "Playbook has no steps (required for channel '{}')",
+            raw.broker.opt_out_channel
+        );
     }
     if raw.steps.len() > MAX_PLAYBOOK_STEPS {
         anyhow::bail!(
@@ -302,6 +355,51 @@ fn validate_broker_metadata(broker: &BrokerDefinition) -> Result<()> {
 
     if broker.allowed_domains.is_empty() {
         anyhow::bail!("allowed_domains cannot be empty — required for security");
+    }
+
+    if !VALID_SOURCE_TYPES.contains(&broker.source_type.as_str()) {
+        anyhow::bail!(
+            "Invalid source_type '{}'. Must be one of: {}",
+            broker.source_type,
+            VALID_SOURCE_TYPES.join(", ")
+        );
+    }
+
+    if let Some(ref s) = broker.sensitivity_default {
+        if !VALID_SENSITIVITY.contains(&s.as_str()) {
+            anyhow::bail!(
+                "Invalid sensitivity_default '{}'. Must be one of: {}",
+                s,
+                VALID_SENSITIVITY.join(", ")
+            );
+        }
+    }
+
+    // Phase 7.3 §J.1/J.2: regulated categories must use manual_only unless
+    // the user has explicitly opted into automated handling. This PR does
+    // NOT read the config flag (that's orchestrator wiring) — for now,
+    // validation always requires manual_only for regulated categories.
+    // A follow-up will plumb `automation_allowed_for_regulated_categories`
+    // through to this validator.
+    if REGULATED_CATEGORIES.contains(&broker.category.as_str())
+        && broker.opt_out_channel != "manual_only"
+    {
+        anyhow::bail!(
+            "Category '{}' is regulated — playbook must use 'manual_only' channel \
+             unless automation_allowed_for_regulated_categories is explicitly enabled \
+             in config. Set opt_out_channel: manual_only and fill manual_instructions.",
+            broker.category
+        );
+    }
+
+    // manual_only channel requires non-empty manual_instructions.
+    if broker.opt_out_channel == "manual_only" {
+        match &broker.manual_instructions {
+            Some(s) if !s.trim().is_empty() => {}
+            _ => anyhow::bail!(
+                "opt_out_channel='manual_only' requires non-empty manual_instructions"
+            ),
+        }
     }
 
     // Validate the broker URL
@@ -841,6 +939,112 @@ steps:
             playbooks.is_empty(),
             "Playbook with file: navigate URL should be rejected"
         );
+    }
+
+    #[test]
+    fn test_phase7_3_source_type_defaults_to_data_broker() {
+        // Existing broker playbooks do NOT specify source_type — the default
+        // must preserve their exact semantics.
+        let dir = tempfile::tempdir().unwrap();
+        write_playbook(dir.path(), "official", "x", &valid_playbook_yaml());
+        let playbooks = load_playbooks(dir.path()).unwrap();
+        assert_eq!(playbooks.len(), 1);
+        assert_eq!(playbooks[0].broker.source_type, "data_broker");
+    }
+
+    #[test]
+    fn test_phase7_3_regulated_category_rejects_web_form() {
+        let yaml = r#"
+broker:
+  id: regfail
+  name: Regulated
+  url: https://bank.example.com
+  category: financial
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains: [bank.example.com]
+
+required_fields: [email]
+steps:
+  - navigate: "https://bank.example.com"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        write_playbook(dir.path(), "official", "regfail", yaml);
+        let playbooks = load_playbooks(dir.path()).unwrap();
+        assert!(
+            playbooks.is_empty(),
+            "Regulated (financial) category must reject non-manual_only channel"
+        );
+    }
+
+    #[test]
+    fn test_phase7_3_manual_only_requires_instructions() {
+        let yaml = r#"
+broker:
+  id: manual-noinstructions
+  name: Manual Broker
+  url: https://example.com
+  category: financial
+  recheck_days: 90
+  opt_out_channel: manual_only
+  allowed_domains: [example.com]
+
+required_fields: []
+steps: []
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        write_playbook(dir.path(), "official", "mn", yaml);
+        let playbooks = load_playbooks(dir.path()).unwrap();
+        assert!(
+            playbooks.is_empty(),
+            "manual_only channel without manual_instructions must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_phase7_3_manual_only_with_instructions_ok() {
+        let yaml = r#"
+broker:
+  id: manual-ok
+  name: Manual OK
+  url: https://example.com
+  category: financial
+  recheck_days: 365
+  opt_out_channel: manual_only
+  manual_instructions: "1. Log in\n2. Delete account\n"
+  allowed_domains: [example.com]
+
+required_fields: []
+steps: []
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        write_playbook(dir.path(), "official", "mok", yaml);
+        let playbooks = load_playbooks(dir.path()).unwrap();
+        assert_eq!(playbooks.len(), 1);
+    }
+
+    #[test]
+    fn test_phase7_3_invalid_sensitivity_default_rejected() {
+        let yaml = r#"
+broker:
+  id: sens-bad
+  name: Bad
+  url: https://example.com
+  source_type: platform_account
+  category: forum
+  sensitivity_default: extreme
+  recheck_days: 90
+  opt_out_channel: web_form
+  allowed_domains: [example.com]
+
+required_fields: [email]
+steps:
+  - navigate: "https://example.com"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        write_playbook(dir.path(), "official", "sens", yaml);
+        let playbooks = load_playbooks(dir.path()).unwrap();
+        assert!(playbooks.is_empty());
     }
 
     #[test]
