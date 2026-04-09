@@ -15,6 +15,79 @@ type HmacSha256 = Hmac<Sha256>;
 /// Allowed Host header values (without port).
 const ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]"];
 
+/// Phase 7.4 §J.4 / SEC-R2-004: validates the `Origin` header (and falls back
+/// to `Referer` for older clients) on state-changing requests, rejecting any
+/// cross-origin request as a DNS-rebinding / CSRF defense.
+///
+/// This is belt-and-suspenders on top of the Host header check: Host gates
+/// what the attacker can even reach the dashboard with, Origin gates what
+/// scripts in other tabs can POST cross-site.
+pub async fn validate_origin(request: Request<Body>, next: Next) -> Response {
+    let method = request.method().clone();
+    // GET/HEAD/OPTIONS are not state-changing; skip.
+    if !matches!(method.as_str(), "POST" | "PUT" | "DELETE" | "PATCH") {
+        return next.run(request).await;
+    }
+
+    let origin = request
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let referer = request
+        .headers()
+        .get(axum::http::header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let candidate = origin.or(referer);
+    let Some(candidate) = candidate else {
+        tracing::warn!("Rejected state-changing request: missing Origin and Referer headers");
+        return (
+            StatusCode::FORBIDDEN,
+            "Forbidden: Origin/Referer header required for state-changing requests",
+        )
+            .into_response();
+    };
+
+    if !origin_is_localhost(&candidate) {
+        tracing::warn!(origin = %candidate, "Rejected cross-origin state-changing request");
+        return (
+            StatusCode::FORBIDDEN,
+            "Forbidden: cross-origin request rejected",
+        )
+            .into_response();
+    }
+
+    next.run(request).await
+}
+
+/// Returns true if the given Origin/Referer URL parses to a localhost host.
+fn origin_is_localhost(origin: &str) -> bool {
+    // Parse scheme://host[:port][/...]
+    let after_scheme = match origin.find("://") {
+        Some(idx) => &origin[idx + 3..],
+        None => return false, // bare hosts never appear in Origin — reject
+    };
+    let host_and_port = after_scheme
+        .split(|c: char| c == '/' || c == '?' || c == '#')
+        .next()
+        .unwrap_or("");
+    // IPv6 bracket form
+    if let Some(h) = host_and_port.strip_prefix('[') {
+        if let Some(end) = h.find(']') {
+            let h = &h[..end];
+            return matches!(h, "::1");
+        }
+        return false;
+    }
+    let host = host_and_port
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(host_and_port);
+    matches!(host, "localhost" | "127.0.0.1")
+}
+
 /// Host header validation middleware.
 ///
 /// Rejects requests with non-localhost Host headers to prevent DNS rebinding attacks.
@@ -47,6 +120,37 @@ pub async fn validate_host(request: Request<Body>, next: Next) -> Response {
     }
 
     next.run(request).await
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::origin_is_localhost;
+
+    #[test]
+    fn test_accepts_localhost_http() {
+        assert!(origin_is_localhost("http://localhost:9847"));
+        assert!(origin_is_localhost("http://127.0.0.1:9847"));
+        assert!(origin_is_localhost("http://localhost"));
+    }
+
+    #[test]
+    fn test_rejects_cross_origin() {
+        assert!(!origin_is_localhost("https://evil.com"));
+        assert!(!origin_is_localhost("http://attacker.example:9847"));
+        assert!(!origin_is_localhost("https://0.0.0.0"));
+    }
+
+    #[test]
+    fn test_rejects_bare_host() {
+        // Origin headers MUST include scheme — bare hosts are suspicious.
+        assert!(!origin_is_localhost("localhost"));
+    }
+
+    #[test]
+    fn test_ipv6_loopback() {
+        assert!(origin_is_localhost("http://[::1]:9847"));
+        assert!(!origin_is_localhost("http://[::2]:9847"));
+    }
 }
 
 /// Extracts host portion without port from a Host header value.

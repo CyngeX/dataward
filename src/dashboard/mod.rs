@@ -185,6 +185,27 @@ pub fn build_router(state: DashboardState) -> Router {
             "/broker/{id}/rerun",
             axum::routing::post(handlers::trigger::trigger_rerun),
         )
+        // Phase 7.4 discovery triage routes (scaffolded — see handlers/discovery.rs).
+        .route(
+            "/discovery",
+            axum::routing::get(handlers::discovery::triage_queue),
+        )
+        .route(
+            "/discovery/accept/{id}",
+            axum::routing::post(handlers::discovery::accept_finding),
+        )
+        .route(
+            "/discovery/dismiss/{id}",
+            axum::routing::post(handlers::discovery::dismiss_finding),
+        )
+        .route(
+            "/discovery/preview/{account_id}/{playbook_version}",
+            axum::routing::get(handlers::discovery::preview),
+        )
+        .route(
+            "/discovery/preview/{id}/approve",
+            axum::routing::post(handlers::discovery::approve_preview),
+        )
         .route("/health", axum::routing::get(handlers::health::health_page))
         .route("/logout", axum::routing::get(handlers::logout))
         .route_layer(middleware::from_fn_with_state(
@@ -227,6 +248,9 @@ pub fn build_router(state: DashboardState) -> Router {
             state.clone(),
             auth::validate_host,
         ))
+        // Phase 7.4 §J.4 / SEC-R2-004: Origin header validation on
+        // state-changing requests, belt-and-suspenders with Host check.
+        .layer(middleware::from_fn(auth::validate_origin))
         .with_state(state)
 }
 
