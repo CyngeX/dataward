@@ -11,6 +11,8 @@ mod init;
 mod legal_ack;
 mod logging;
 mod orchestrator;
+#[cfg(test)]
+mod phase7_audit;
 mod rekey;
 mod retention;
 mod scheduler;
