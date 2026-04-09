@@ -478,6 +478,23 @@ pub fn migrate_v1_to_v2(conn: &Connection, backup_path: &Path) -> Result<()> {
     }
 }
 
+// -- Phase 7.4 post-migration banner helpers (FLOW-009) --
+
+/// Config key for whether the post-migration banner should be shown.
+const BANNER_KEY: &str = "ui.post_migration_banner_dismissed";
+
+/// Returns true if the user has NOT yet dismissed the post-migration banner.
+#[allow(dead_code)]
+pub fn post_migration_banner_visible(conn: &Connection) -> Result<bool> {
+    Ok(get_config(conn, BANNER_KEY)?.is_none())
+}
+
+/// Marks the post-migration banner as dismissed.
+#[allow(dead_code)]
+pub fn dismiss_post_migration_banner(conn: &Connection) -> Result<()> {
+    set_config(conn, BANNER_KEY, &chrono::Utc::now().to_rfc3339())
+}
+
 // -- Phase 7.1 sibling-table DAOs --
 
 /// A row in `platform_accounts` (Phase 7.1 §B).

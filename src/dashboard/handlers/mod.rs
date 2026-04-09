@@ -1,4 +1,5 @@
 pub mod captcha;
+pub mod discovery;
 pub mod health;
 pub mod history;
 pub mod proof;
