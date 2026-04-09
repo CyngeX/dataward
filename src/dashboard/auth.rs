@@ -69,10 +69,7 @@ fn origin_is_localhost(origin: &str) -> bool {
         Some(idx) => &origin[idx + 3..],
         None => return false, // bare hosts never appear in Origin — reject
     };
-    let host_and_port = after_scheme
-        .split(|c: char| c == '/' || c == '?' || c == '#')
-        .next()
-        .unwrap_or("");
+    let host_and_port = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
     // IPv6 bracket form
     if let Some(h) = host_and_port.strip_prefix('[') {
         if let Some(end) = h.find(']') {
